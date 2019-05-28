@@ -281,7 +281,10 @@ bool CDSPass::addrPointsToConstantData(Value *Addr) {
 bool CDSPass::runOnFunction(Function &F) {
   if (F.getName() == "main") {
     F.setName("user_main");
-    errs() << "main replaced by user_main\n";
+//    errs() << "main replaced by user_main\n";
+  }
+
+  if (true) {
 
     initializeCallbacks( *F.getParent() );
 
@@ -294,9 +297,6 @@ bool CDSPass::runOnFunction(Function &F) {
     bool Res = false;
     const DataLayout &DL = F.getParent()->getDataLayout();
   
-//    errs() << "Before\n";
-//    F.dump();
-
     for (auto &B : F) {
       for (auto &I : B) {
         if ( (&I)->isAtomic() ) {
@@ -311,16 +311,21 @@ bool CDSPass::runOnFunction(Function &F) {
     }
 
     for (auto Inst : AllLoadsAndStores) {
-      Res |= instrumentLoadOrStore(Inst, DL);
+//      Res |= instrumentLoadOrStore(Inst, DL);
 //      errs() << "load and store are replaced\n";
     }
 
     for (auto Inst : AtomicAccesses) {
       Res |= instrumentAtomic(Inst);
-    } 
+    }
   }
-//	  errs() << "After\n";
-//	  F.dump();
+
+/*
+  if (Res) {
+    errs() << F.getName();
+    errs() << " has above instructions replaced\n";
+  }
+*/
   
   return false;
 }
@@ -449,7 +454,7 @@ bool CDSPass::instrumentAtomic(Instruction * I) {
 
     Instruction* funcInst=CallInst::Create(CDSAtomicStore[index], args,"");
     ReplaceInstWithInst(SI, funcInst);
-    errs() << "Store replaced\n";
+//    errs() << "Store replaced\n";
   } else if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
     int atomic_order_index = getAtomicOrderIndex(LI->getOrdering());
 
@@ -462,7 +467,7 @@ bool CDSPass::instrumentAtomic(Instruction * I) {
 
     Instruction* funcInst=CallInst::Create(CDSAtomicLoad[index], args, "");
     ReplaceInstWithInst(LI, funcInst);
-    errs() << "Load Replaced\n";
+//    errs() << "Load Replaced\n";
   } else if (AtomicRMWInst *RMWI = dyn_cast<AtomicRMWInst>(I)) {
     int atomic_order_index = getAtomicOrderIndex(RMWI->getOrdering());
 
@@ -476,8 +481,8 @@ bool CDSPass::instrumentAtomic(Instruction * I) {
 
     Instruction* funcInst = CallInst::Create(CDSAtomicRMW[RMWI->getOperation()][index], args, "");
     ReplaceInstWithInst(RMWI, funcInst);
-    errs() << RMWI->getOperationName(RMWI->getOperation());
-    errs() << " replaced\n";
+//    errs() << RMWI->getOperationName(RMWI->getOperation());
+//    errs() << " replaced\n";
   } else if (AtomicCmpXchgInst *CASI = dyn_cast<AtomicCmpXchgInst>(I)) {
     IRBuilder<> IRB(CASI);
 
@@ -525,7 +530,7 @@ bool CDSPass::instrumentAtomic(Instruction * I) {
 
     CallInst *funcInst = CallInst::Create(CDSAtomicThreadFence, Args);
     ReplaceInstWithInst(FI, funcInst);
-    errs() << "Thread Fences replaced\n";
+//    errs() << "Thread Fences replaced\n";
   }
   return true;
 }

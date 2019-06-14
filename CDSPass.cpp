@@ -33,6 +33,7 @@
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/DebugLoc.h"
 #include "llvm/Pass.h"
 #include "llvm/ProfileData/InstrProf.h"
 #include "llvm/Support/raw_ostream.h"
@@ -42,9 +43,7 @@
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
-#include <list>
 #include <vector>
-// #include "llvm/Support/MathExtras.h"
 
 #define DEBUG_TYPE "CDS"
 using namespace llvm;
@@ -78,10 +77,12 @@ Type * VoidTy;
 
 Constant * CDSLoad[FUNCARRAYSIZE];
 Constant * CDSStore[FUNCARRAYSIZE];
+Constant * CDSAtomicInit[FUNCARRAYSIZE];
 Constant * CDSAtomicLoad[FUNCARRAYSIZE];
 Constant * CDSAtomicStore[FUNCARRAYSIZE];
 Constant * CDSAtomicRMW[AtomicRMWInst::LAST_BINOP + 1][FUNCARRAYSIZE];
-Constant * CDSAtomicCAS[FUNCARRAYSIZE];
+Constant * CDSAtomicCAS_V1[FUNCARRAYSIZE];
+Constant * CDSAtomicCAS_V2[FUNCARRAYSIZE];
 Constant * CDSAtomicThreadFence;
 
 bool start = false;
@@ -107,13 +108,13 @@ int getAtomicOrderIndex(AtomicOrdering order){
 }
 
 int getTypeSize(Type* type) {
-  if (type==Int32PtrTy) {
-    return sizeof(int)*8;
-  } else if (type==Int8PtrTy) {
+  if (type == Int8PtrTy) {
     return sizeof(char)*8;
-  } else if (type==Int16PtrTy) {
+  } else if (type == Int16PtrTy) {
     return sizeof(short)*8;
-  } else if (type==Int64PtrTy) {
+  } else if (type == Int32PtrTy) {
+    return sizeof(int)*8;
+  } else if (type == Int64PtrTy) {
     return sizeof(long long int)*8;
   } else {
     return sizeof(void*)*8;
@@ -141,83 +142,14 @@ namespace {
   private:
     void initializeCallbacks(Module &M);
     bool instrumentLoadOrStore(Instruction *I, const DataLayout &DL);
-    bool instrumentAtomic(Instruction *I);
+    bool instrumentAtomic(Instruction *I, const DataLayout &DL);
+    bool instrumentAtomicCall(CallInst *CI, const DataLayout &DL);
     void chooseInstructionsToInstrument(SmallVectorImpl<Instruction *> &Local,
                                       SmallVectorImpl<Instruction *> &All,
                                       const DataLayout &DL);
     bool addrPointsToConstantData(Value *Addr);
+    int getMemoryAccessFuncIndex(Value *Addr, const DataLayout &DL);
   };
-}
-
-void CDSPass::initializeCallbacks(Module &M) {
-  LLVMContext &Ctx = M.getContext();
-
-  Int8Ty  = Type::getInt8Ty(Ctx);
-  Int16Ty = Type::getInt16Ty(Ctx);
-  Int32Ty = Type::getInt32Ty(Ctx);
-  Int64Ty = Type::getInt64Ty(Ctx);
-  OrdTy = Type::getInt32Ty(Ctx);
-
-  Int8PtrTy  = Type::getInt8PtrTy(Ctx);
-  Int16PtrTy = Type::getInt16PtrTy(Ctx);
-  Int32PtrTy = Type::getInt32PtrTy(Ctx);
-  Int64PtrTy = Type::getInt64PtrTy(Ctx);
-
-  VoidTy = Type::getVoidTy(Ctx);
-  
-
-  // Get the function to call from our untime library.
-  for (unsigned i = 0; i < FUNCARRAYSIZE; i++) {
-    const unsigned ByteSize = 1U << i;
-    const unsigned BitSize = ByteSize * 8;
-//    errs() << BitSize << "\n";
-    std::string ByteSizeStr = utostr(ByteSize);
-    std::string BitSizeStr = utostr(BitSize);
-
-    Type *Ty = Type::getIntNTy(Ctx, BitSize);
-    Type *PtrTy = Ty->getPointerTo();
-
-    // uint8_t cds_atomic_load8 (void * obj, int atomic_index)
-    // void cds_atomic_store8 (void * obj, int atomic_index, uint8_t val)
-    SmallString<32> LoadName("cds_load" + BitSizeStr);
-    SmallString<32> StoreName("cds_store" + BitSizeStr);
-    SmallString<32> AtomicLoadName("cds_atomic_load" + BitSizeStr);
-    SmallString<32> AtomicStoreName("cds_atomic_store" + BitSizeStr);
-
-    CDSLoad[i]  = M.getOrInsertFunction(LoadName, VoidTy, PtrTy);
-    CDSStore[i] = M.getOrInsertFunction(StoreName, VoidTy, PtrTy);
-    CDSAtomicLoad[i]  = M.getOrInsertFunction(AtomicLoadName, Ty, PtrTy, OrdTy);
-    CDSAtomicStore[i] = M.getOrInsertFunction(AtomicStoreName, VoidTy, PtrTy, OrdTy, Ty);
-
-    for (int op = AtomicRMWInst::FIRST_BINOP; op <= AtomicRMWInst::LAST_BINOP; ++op) {
-      CDSAtomicRMW[op][i] = nullptr;
-      std::string NamePart;
-
-      if (op == AtomicRMWInst::Xchg)
-        NamePart = "_exchange";
-      else if (op == AtomicRMWInst::Add) 
-        NamePart = "_fetch_add";
-      else if (op == AtomicRMWInst::Sub)
-        NamePart = "_fetch_sub";
-      else if (op == AtomicRMWInst::And)
-        NamePart = "_fetch_and";
-      else if (op == AtomicRMWInst::Or)
-        NamePart = "_fetch_or";
-      else if (op == AtomicRMWInst::Xor)
-        NamePart = "_fetch_xor";
-      else
-        continue;
-
-      SmallString<32> AtomicRMWName("cds_atomic" + NamePart + BitSizeStr);
-      CDSAtomicRMW[op][i] = M.getOrInsertFunction(AtomicRMWName, Ty, PtrTy, OrdTy, Ty);
-    }
-
-    // only supportes strong version
-    SmallString<32> AtomicCASName("cds_atomic_compare_exchange" + BitSizeStr);    
-    CDSAtomicCAS[i]   = M.getOrInsertFunction(AtomicCASName, Ty, PtrTy, Ty, Ty, OrdTy, OrdTy);
-  }
-
-  CDSAtomicThreadFence = M.getOrInsertFunction("cds_atomic_thread_fence", VoidTy, OrdTy);
 }
 
 static bool isVtableAccess(Instruction *I) {
@@ -225,6 +157,10 @@ static bool isVtableAccess(Instruction *I) {
     return Tag->isTBAAVtableAccess();
   return false;
 }
+
+#include "initializeCallbacks.hpp"
+#include "isAtomicCall.hpp"
+#include "instrumentAtomicCall.hpp"
 
 static bool shouldInstrumentReadWriteFromAddress(const Module *M, Value *Addr) {
   // Peel off GEPs and BitCasts.
@@ -281,11 +217,10 @@ bool CDSPass::addrPointsToConstantData(Value *Addr) {
 bool CDSPass::runOnFunction(Function &F) {
   if (F.getName() == "main") {
     F.setName("user_main");
-//    errs() << "main replaced by user_main\n";
+    errs() << "main replaced by user_main\n";
   }
 
   if (true) {
-
     initializeCallbacks( *F.getParent() );
 
     SmallVector<Instruction*, 8> AllLoadsAndStores;
@@ -296,17 +231,29 @@ bool CDSPass::runOnFunction(Function &F) {
 
     bool Res = false;
     const DataLayout &DL = F.getParent()->getDataLayout();
-  
+
+    errs() << "--- " << F.getName() << "---\n";
+
     for (auto &B : F) {
       for (auto &I : B) {
-        if ( (&I)->isAtomic() ) {
+        if ( (&I)->isAtomic() || isAtomicCall(&I) ) {
           AtomicAccesses.push_back(&I);
+
+          const llvm::DebugLoc & debug_location = I.getDebugLoc();
+          std::string position_string;
+          {
+            llvm::raw_string_ostream position_stream (position_string);
+            debug_location . print (position_stream);
+          }
+
+          errs() << I << "\n" << (position_string) << "\n\n";
         } else if (isa<LoadInst>(I) || isa<StoreInst>(I)) {
           LocalLoadsAndStores.push_back(&I);
         } else if (isa<CallInst>(I) || isa<InvokeInst>(I)) {
           // not implemented yet
         }
       }
+
       chooseInstructionsToInstrument(LocalLoadsAndStores, AllLoadsAndStores, DL);
     }
 
@@ -316,17 +263,15 @@ bool CDSPass::runOnFunction(Function &F) {
     }
 
     for (auto Inst : AtomicAccesses) {
-      Res |= instrumentAtomic(Inst);
+      Res |= instrumentAtomic(Inst, DL);
     }
+
+    if (F.getName() == "user_main") {
+      // F.dump();
+    }
+
   }
 
-/*
-  if (Res) {
-    errs() << F.getName();
-    errs() << " has above instructions replaced\n";
-  }
-*/
-  
   return false;
 }
 
@@ -436,10 +381,14 @@ bool CDSPass::instrumentLoadOrStore(Instruction *I,
   return true;
 }
 
-
-bool CDSPass::instrumentAtomic(Instruction * I) {
+// todo: replace getTypeSize with the getMemoryAccessFuncIndex
+bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
   IRBuilder<> IRB(I);
   // LLVMContext &Ctx = IRB.getContext();
+
+  if (auto *CI = dyn_cast<CallInst>(I)) {
+    return instrumentAtomicCall(CI, DL);
+  }
 
   if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
     int atomic_order_index = getAtomicOrderIndex(SI->getOrdering());
@@ -447,7 +396,7 @@ bool CDSPass::instrumentAtomic(Instruction * I) {
     Value *val = SI->getValueOperand();
     Value *ptr = SI->getPointerOperand();
     Value *order = ConstantInt::get(OrdTy, atomic_order_index);
-    Value *args[] = {ptr, order, val};
+    Value *args[] = {ptr, val, order};
 
     int size=getTypeSize(ptr->getType());
     int index=sizetoindex(size);
@@ -474,7 +423,7 @@ bool CDSPass::instrumentAtomic(Instruction * I) {
     Value *val = RMWI->getValOperand();
     Value *ptr = RMWI->getPointerOperand();
     Value *order = ConstantInt::get(OrdTy, atomic_order_index);
-    Value *args[] = {ptr, order, val};
+    Value *args[] = {ptr, val, order};
 
     int size = getTypeSize(ptr->getType());
     int index = sizetoindex(size);
@@ -507,7 +456,7 @@ bool CDSPass::instrumentAtomic(Instruction * I) {
                      CmpOperand, NewOperand,
                      order_succ, order_fail};
 
-    CallInst *funcInst = IRB.CreateCall(CDSAtomicCAS[index], Args);
+    CallInst *funcInst = IRB.CreateCall(CDSAtomicCAS_V1[index], Args);
     Value *Success = IRB.CreateICmpEQ(funcInst, CmpOperand);
 
     Value *OldVal = funcInst;
@@ -535,16 +484,31 @@ bool CDSPass::instrumentAtomic(Instruction * I) {
   return true;
 }
 
+int CDSPass::getMemoryAccessFuncIndex(Value *Addr,
+                                              const DataLayout &DL) {
+  Type *OrigPtrTy = Addr->getType();
+  Type *OrigTy = cast<PointerType>(OrigPtrTy)->getElementType();
+  assert(OrigTy->isSized());
+  uint32_t TypeSize = DL.getTypeStoreSizeInBits(OrigTy);
+  if (TypeSize != 8  && TypeSize != 16 &&
+      TypeSize != 32 && TypeSize != 64 && TypeSize != 128) {
+    // NumAccessesWithBadSize++;
+    // Ignore all unusual sizes.
+    return -1;
+  }
+  size_t Idx = countTrailingZeros(TypeSize / 8);
+  // assert(Idx < FUNCARRAYSIZE);
+  return Idx;
+}
 
 
 char CDSPass::ID = 0;
 
 // Automatically enable the pass.
-// http://adriansampson.net/blog/clangpass.html
 static void registerCDSPass(const PassManagerBuilder &,
                          legacy::PassManagerBase &PM) {
   PM.add(new CDSPass());
 }
 static RegisterStandardPasses 
-	RegisterMyPass(PassManagerBuilder::EP_EarlyAsPossible,
+	RegisterMyPass(PassManagerBuilder::EP_OptimizerLast,
 registerCDSPass);

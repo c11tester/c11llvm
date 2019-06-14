@@ -1,7 +1,3 @@
-bool containsStr() {
-
-}
-
 bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 	IRBuilder<> IRB(CI);
 	Function *fun = CI->getCalledFunction();
@@ -14,6 +10,9 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		Value *param = *it;
 		parameters.push_back(param);
 	}
+
+	// obtain source line number of the CallInst
+	Value *position = getPosition(CI, IRB);
 
 	// the pointer to the address is always the first argument
 	Value *OrigPtr = parameters[0];
@@ -30,9 +29,9 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 	if (funName.contains("atomic_init")) {
 		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
 		Value *val = IRB.CreateBitOrPointerCast(parameters[1], Ty);
-		Value *args[] = {ptr, val};
+		Value *args[] = {ptr, val, position};
 
-		Instruction* funcInst=CallInst::Create(CDSAtomicInit[Idx], args,"");
+		Instruction* funcInst=CallInst::Create(CDSAtomicInit[Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
 
 		return true;
@@ -49,9 +48,9 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		else 
 			order = ConstantInt::get(OrdTy, 
 							(int) AtomicOrderingCABI::seq_cst);
-		Value *args[] = {ptr, order};
+		Value *args[] = {ptr, order, position};
 		
-		Instruction* funcInst=CallInst::Create(CDSAtomicLoad[Idx], args,"");
+		Instruction* funcInst=CallInst::Create(CDSAtomicLoad[Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
 
 		return true;
@@ -70,9 +69,9 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		else 
 			order = ConstantInt::get(OrdTy, 
 							(int) AtomicOrderingCABI::seq_cst);
-		Value *args[] = {ptr, val, order};
+		Value *args[] = {ptr, val, order, position};
 		
-		Instruction* funcInst=CallInst::Create(CDSAtomicStore[Idx], args,"");
+		Instruction* funcInst=CallInst::Create(CDSAtomicStore[Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
 
 		return true;
@@ -110,9 +109,9 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		else 
 			order = ConstantInt::get(OrdTy, 
 							(int) AtomicOrderingCABI::seq_cst);
-		Value *args[] = {ptr, val, order};
+		Value *args[] = {ptr, val, order, position};
 		
-		Instruction* funcInst=CallInst::Create(CDSAtomicRMW[op][Idx], args,"");
+		Instruction* funcInst=CallInst::Create(CDSAtomicRMW[op][Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
 
 		return true;
@@ -140,9 +139,9 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		}
 
 		Value *args[] = {Addr, CmpOperand, NewOperand, 
-									order_succ, order_fail};
+							order_succ, order_fail, position};
 		
-		Instruction* funcInst=CallInst::Create(CDSAtomicCAS_V2[Idx], args,"");
+		Instruction* funcInst=CallInst::Create(CDSAtomicCAS_V2[Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
 
 		return true;

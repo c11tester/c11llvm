@@ -10,7 +10,7 @@ bool isAtomicCall(Instruction *I)
 
 		if ( (CI->isTailCall() && funName.contains("atomic_")) ||
 			funName.contains("atomic_compare_exchange_") ) {
-			printArgs(CI);
+			// printArgs(CI);
 			return true;
 		}
 	}
@@ -26,7 +26,7 @@ void printArgs (CallInst *CI)
 	User::op_iterator begin = CI->arg_begin();
 	User::op_iterator end = CI->arg_end();
 
-	if (funName.find("atomic_") != -1) {
+	if ( funName.contains("atomic_") ) {
 		std::vector<Value *> parameters;
 
 		for (User::op_iterator it = begin; it != end; ++it) {

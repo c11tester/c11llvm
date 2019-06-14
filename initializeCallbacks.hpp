@@ -36,9 +36,12 @@ void CDSPass::initializeCallbacks(Module &M) {
 
 		CDSLoad[i]  = M.getOrInsertFunction(LoadName, VoidTy, PtrTy);
 		CDSStore[i] = M.getOrInsertFunction(StoreName, VoidTy, PtrTy);
-		CDSAtomicInit[i] = M.getOrInsertFunction(AtomicInitName, VoidTy, PtrTy, Ty);
-		CDSAtomicLoad[i]  = M.getOrInsertFunction(AtomicLoadName, Ty, PtrTy, OrdTy);
-		CDSAtomicStore[i] = M.getOrInsertFunction(AtomicStoreName, VoidTy, PtrTy, Ty, OrdTy);
+		CDSAtomicInit[i] = M.getOrInsertFunction(AtomicInitName, 
+								VoidTy, PtrTy, Ty, Int8PtrTy);
+		CDSAtomicLoad[i]  = M.getOrInsertFunction(AtomicLoadName, 
+								Ty, PtrTy, OrdTy, Int8PtrTy);
+		CDSAtomicStore[i] = M.getOrInsertFunction(AtomicStoreName, 
+								VoidTy, PtrTy, Ty, OrdTy, Int8PtrTy);
 
 		for (int op = AtomicRMWInst::FIRST_BINOP; 
 			op <= AtomicRMWInst::LAST_BINOP; ++op) {
@@ -61,17 +64,19 @@ void CDSPass::initializeCallbacks(Module &M) {
 				continue;
 
 			SmallString<32> AtomicRMWName("cds_atomic" + NamePart + BitSizeStr);
-			CDSAtomicRMW[op][i] = M.getOrInsertFunction(AtomicRMWName, Ty, PtrTy, Ty, OrdTy);
+			CDSAtomicRMW[op][i] = M.getOrInsertFunction(AtomicRMWName, 
+										Ty, PtrTy, Ty, OrdTy, Int8PtrTy);
 		}
 
 		// only supportes strong version
 		SmallString<32> AtomicCASName_V1("cds_atomic_compare_exchange" + BitSizeStr + "_v1");
 		SmallString<32> AtomicCASName_V2("cds_atomic_compare_exchange" + BitSizeStr + "_v2");
 		CDSAtomicCAS_V1[i] = M.getOrInsertFunction(AtomicCASName_V1, 
-								Ty, PtrTy, Ty, Ty, OrdTy, OrdTy);
+								Ty, PtrTy, Ty, Ty, OrdTy, OrdTy, Int8PtrTy);
 		CDSAtomicCAS_V2[i] = M.getOrInsertFunction(AtomicCASName_V2, 
-								Int1Ty, PtrTy, PtrTy, Ty, OrdTy, OrdTy);
+								Int1Ty, PtrTy, PtrTy, Ty, OrdTy, OrdTy, Int8PtrTy);
 	}
 
-	CDSAtomicThreadFence = M.getOrInsertFunction("cds_atomic_thread_fence", VoidTy, OrdTy);
+	CDSAtomicThreadFence = M.getOrInsertFunction("cds_atomic_thread_fence", 
+													VoidTy, OrdTy, Int8PtrTy);
 }

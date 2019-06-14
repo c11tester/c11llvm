@@ -25,7 +25,6 @@
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Analysis/CaptureTracking.h"
 #include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/CFG.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -33,7 +32,6 @@
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
-#include "llvm/IR/DebugLoc.h"
 #include "llvm/Pass.h"
 #include "llvm/ProfileData/InstrProf.h"
 #include "llvm/Support/raw_ostream.h"
@@ -47,6 +45,8 @@
 
 #define DEBUG_TYPE "CDS"
 using namespace llvm;
+
+#include "getPosition.hpp"
 
 #define FUNCARRAYSIZE 4
 
@@ -238,15 +238,6 @@ bool CDSPass::runOnFunction(Function &F) {
       for (auto &I : B) {
         if ( (&I)->isAtomic() || isAtomicCall(&I) ) {
           AtomicAccesses.push_back(&I);
-
-          const llvm::DebugLoc & debug_location = I.getDebugLoc();
-          std::string position_string;
-          {
-            llvm::raw_string_ostream position_stream (position_string);
-            debug_location . print (position_stream);
-          }
-
-          errs() << I << "\n" << (position_string) << "\n\n";
         } else if (isa<LoadInst>(I) || isa<StoreInst>(I)) {
           LocalLoadsAndStores.push_back(&I);
         } else if (isa<CallInst>(I) || isa<InvokeInst>(I)) {
@@ -390,18 +381,20 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
     return instrumentAtomicCall(CI, DL);
   }
 
+  Value *position = getPosition(I, IRB);
+
   if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
     int atomic_order_index = getAtomicOrderIndex(SI->getOrdering());
 
     Value *val = SI->getValueOperand();
     Value *ptr = SI->getPointerOperand();
     Value *order = ConstantInt::get(OrdTy, atomic_order_index);
-    Value *args[] = {ptr, val, order};
+    Value *args[] = {ptr, val, order, position};
 
     int size=getTypeSize(ptr->getType());
     int index=sizetoindex(size);
 
-    Instruction* funcInst=CallInst::Create(CDSAtomicStore[index], args,"");
+    Instruction* funcInst=CallInst::Create(CDSAtomicStore[index], args);
     ReplaceInstWithInst(SI, funcInst);
 //    errs() << "Store replaced\n";
   } else if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
@@ -409,12 +402,12 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 
     Value *ptr = LI->getPointerOperand();
     Value *order = ConstantInt::get(OrdTy, atomic_order_index);
-    Value *args[] = {ptr, order};
+    Value *args[] = {ptr, order, position};
 
     int size=getTypeSize(ptr->getType());
     int index=sizetoindex(size);
 
-    Instruction* funcInst=CallInst::Create(CDSAtomicLoad[index], args, "");
+    Instruction* funcInst=CallInst::Create(CDSAtomicLoad[index], args);
     ReplaceInstWithInst(LI, funcInst);
 //    errs() << "Load Replaced\n";
   } else if (AtomicRMWInst *RMWI = dyn_cast<AtomicRMWInst>(I)) {
@@ -423,12 +416,12 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
     Value *val = RMWI->getValOperand();
     Value *ptr = RMWI->getPointerOperand();
     Value *order = ConstantInt::get(OrdTy, atomic_order_index);
-    Value *args[] = {ptr, val, order};
+    Value *args[] = {ptr, val, order, position};
 
     int size = getTypeSize(ptr->getType());
     int index = sizetoindex(size);
 
-    Instruction* funcInst = CallInst::Create(CDSAtomicRMW[RMWI->getOperation()][index], args, "");
+    Instruction* funcInst = CallInst::Create(CDSAtomicRMW[RMWI->getOperation()][index], args);
     ReplaceInstWithInst(RMWI, funcInst);
 //    errs() << RMWI->getOperationName(RMWI->getOperation());
 //    errs() << " replaced\n";
@@ -454,7 +447,7 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 
     Value *Args[] = {IRB.CreatePointerCast(Addr, PtrTy),
                      CmpOperand, NewOperand,
-                     order_succ, order_fail};
+                     order_succ, order_fail, position};
 
     CallInst *funcInst = IRB.CreateCall(CDSAtomicCAS_V1[index], Args);
     Value *Success = IRB.CreateICmpEQ(funcInst, CmpOperand);
@@ -475,7 +468,7 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
   } else if (FenceInst *FI = dyn_cast<FenceInst>(I)) {
     int atomic_order_index = getAtomicOrderIndex(FI->getOrdering());
     Value *order = ConstantInt::get(OrdTy, atomic_order_index);
-    Value *Args[] = {order};
+    Value *Args[] = {order, position};
 
     CallInst *funcInst = CallInst::Create(CDSAtomicThreadFence, Args);
     ReplaceInstWithInst(FI, funcInst);

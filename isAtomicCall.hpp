@@ -6,6 +6,9 @@ bool isAtomicCall(Instruction *I)
 {
 	if ( auto *CI = dyn_cast<CallInst>(I) ) {
 		Function *fun = CI->getCalledFunction();
+		if (fun == NULL)
+			return false;
+
 		StringRef funName = fun->getName();
 
 		if ( (CI->isTailCall() && funName.contains("atomic_")) ||

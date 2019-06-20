@@ -46,7 +46,19 @@
 #define DEBUG_TYPE "CDS"
 using namespace llvm;
 
-#include "getPosition.hpp"
+#include <llvm/IR/DebugLoc.h>
+
+Value *getPosition( Instruction * I, IRBuilder <> IRB)
+{
+	const DebugLoc & debug_location = I->getDebugLoc ();
+	std::string position_string;
+	{
+		llvm::raw_string_ostream position_stream (position_string);
+		debug_location . print (position_stream);
+	}
+
+	return IRB . CreateGlobalStringPtr (position_string);
+}
 
 #define FUNCARRAYSIZE 4
 
@@ -158,9 +170,281 @@ static bool isVtableAccess(Instruction *I) {
   return false;
 }
 
-#include "initializeCallbacks.hpp"
-#include "isAtomicCall.hpp"
-#include "instrumentAtomicCall.hpp"
+void CDSPass::initializeCallbacks(Module &M) {
+	LLVMContext &Ctx = M.getContext();
+
+	Type * Int1Ty = Type::getInt1Ty(Ctx);
+	Int8Ty  = Type::getInt8Ty(Ctx);
+	Int16Ty = Type::getInt16Ty(Ctx);
+	Int32Ty = Type::getInt32Ty(Ctx);
+	Int64Ty = Type::getInt64Ty(Ctx);
+	OrdTy = Type::getInt32Ty(Ctx);
+
+	Int8PtrTy  = Type::getInt8PtrTy(Ctx);
+	Int16PtrTy = Type::getInt16PtrTy(Ctx);
+	Int32PtrTy = Type::getInt32PtrTy(Ctx);
+	Int64PtrTy = Type::getInt64PtrTy(Ctx);
+
+	VoidTy = Type::getVoidTy(Ctx);
+  
+	// Get the function to call from our untime library.
+	for (unsigned i = 0; i < FUNCARRAYSIZE; i++) {
+		const unsigned ByteSize = 1U << i;
+		const unsigned BitSize = ByteSize * 8;
+
+		std::string ByteSizeStr = utostr(ByteSize);
+		std::string BitSizeStr = utostr(BitSize);
+
+		Type *Ty = Type::getIntNTy(Ctx, BitSize);
+		Type *PtrTy = Ty->getPointerTo();
+
+		// uint8_t cds_atomic_load8 (void * obj, int atomic_index)
+		// void cds_atomic_store8 (void * obj, int atomic_index, uint8_t val)
+		SmallString<32> LoadName("cds_load" + BitSizeStr);
+		SmallString<32> StoreName("cds_store" + BitSizeStr);
+		SmallString<32> AtomicInitName("cds_atomic_init" + BitSizeStr);
+		SmallString<32> AtomicLoadName("cds_atomic_load" + BitSizeStr);
+		SmallString<32> AtomicStoreName("cds_atomic_store" + BitSizeStr);
+
+		CDSLoad[i]  = M.getOrInsertFunction(LoadName, VoidTy, PtrTy);
+		CDSStore[i] = M.getOrInsertFunction(StoreName, VoidTy, PtrTy);
+		CDSAtomicInit[i] = M.getOrInsertFunction(AtomicInitName, 
+								VoidTy, PtrTy, Ty, Int8PtrTy);
+		CDSAtomicLoad[i]  = M.getOrInsertFunction(AtomicLoadName, 
+								Ty, PtrTy, OrdTy, Int8PtrTy);
+		CDSAtomicStore[i] = M.getOrInsertFunction(AtomicStoreName, 
+								VoidTy, PtrTy, Ty, OrdTy, Int8PtrTy);
+
+		for (int op = AtomicRMWInst::FIRST_BINOP; 
+			op <= AtomicRMWInst::LAST_BINOP; ++op) {
+			CDSAtomicRMW[op][i] = nullptr;
+			std::string NamePart;
+
+			if (op == AtomicRMWInst::Xchg)
+				NamePart = "_exchange";
+			else if (op == AtomicRMWInst::Add) 
+				NamePart = "_fetch_add";
+			else if (op == AtomicRMWInst::Sub)
+				NamePart = "_fetch_sub";
+			else if (op == AtomicRMWInst::And)
+				NamePart = "_fetch_and";
+			else if (op == AtomicRMWInst::Or)
+				NamePart = "_fetch_or";
+			else if (op == AtomicRMWInst::Xor)
+				NamePart = "_fetch_xor";
+			else
+				continue;
+
+			SmallString<32> AtomicRMWName("cds_atomic" + NamePart + BitSizeStr);
+			CDSAtomicRMW[op][i] = M.getOrInsertFunction(AtomicRMWName, 
+										Ty, PtrTy, Ty, OrdTy, Int8PtrTy);
+		}
+
+		// only supportes strong version
+		SmallString<32> AtomicCASName_V1("cds_atomic_compare_exchange" + BitSizeStr + "_v1");
+		SmallString<32> AtomicCASName_V2("cds_atomic_compare_exchange" + BitSizeStr + "_v2");
+		CDSAtomicCAS_V1[i] = M.getOrInsertFunction(AtomicCASName_V1, 
+								Ty, PtrTy, Ty, Ty, OrdTy, OrdTy, Int8PtrTy);
+		CDSAtomicCAS_V2[i] = M.getOrInsertFunction(AtomicCASName_V2, 
+								Int1Ty, PtrTy, PtrTy, Ty, OrdTy, OrdTy, Int8PtrTy);
+	}
+
+	CDSAtomicThreadFence = M.getOrInsertFunction("cds_atomic_thread_fence", 
+													VoidTy, OrdTy, Int8PtrTy);
+}
+
+void printArgs(CallInst *);
+
+bool isAtomicCall(Instruction *I)
+{
+	if ( auto *CI = dyn_cast<CallInst>(I) ) {
+		Function *fun = CI->getCalledFunction();
+		if (fun == NULL)
+			return false;
+
+		StringRef funName = fun->getName();
+
+		if ( (CI->isTailCall() && funName.contains("atomic_")) ||
+			funName.contains("atomic_compare_exchange_") ) {
+			// printArgs(CI);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void printArgs (CallInst *CI)
+{
+	Function *fun = CI->getCalledFunction();
+	StringRef funName = fun->getName();
+
+	User::op_iterator begin = CI->arg_begin();
+	User::op_iterator end = CI->arg_end();
+
+	if ( funName.contains("atomic_") ) {
+		std::vector<Value *> parameters;
+
+		for (User::op_iterator it = begin; it != end; ++it) {
+			Value *param = *it;
+			parameters.push_back(param);
+			errs() << *param << " type: " << *param->getType()  << "\n";
+		}
+	}
+
+}
+
+bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
+	IRBuilder<> IRB(CI);
+	Function *fun = CI->getCalledFunction();
+	StringRef funName = fun->getName();
+	std::vector<Value *> parameters;
+
+	User::op_iterator begin = CI->arg_begin();
+	User::op_iterator end = CI->arg_end();
+	for (User::op_iterator it = begin; it != end; ++it) {
+		Value *param = *it;
+		parameters.push_back(param);
+	}
+
+	// obtain source line number of the CallInst
+	Value *position = getPosition(CI, IRB);
+
+	// the pointer to the address is always the first argument
+	Value *OrigPtr = parameters[0];
+	int Idx = getMemoryAccessFuncIndex(OrigPtr, DL);
+	if (Idx < 0)
+		return false;
+
+	const unsigned ByteSize = 1U << Idx;
+	const unsigned BitSize = ByteSize * 8;
+	Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
+	Type *PtrTy = Ty->getPointerTo();
+
+	// atomic_init; args = {obj, order}
+	if (funName.contains("atomic_init")) {
+		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
+		Value *val = IRB.CreateBitOrPointerCast(parameters[1], Ty);
+		Value *args[] = {ptr, val, position};
+
+		Instruction* funcInst=CallInst::Create(CDSAtomicInit[Idx], args);
+		ReplaceInstWithInst(CI, funcInst);
+
+		return true;
+	}
+
+	// atomic_load; args = {obj, order}
+	if (funName.contains("atomic_load")) {
+		bool isExplicit = funName.contains("atomic_load_explicit");
+
+		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
+		Value *order;
+		if (isExplicit)
+			order = IRB.CreateBitOrPointerCast(parameters[1], OrdTy);
+		else 
+			order = ConstantInt::get(OrdTy, 
+							(int) AtomicOrderingCABI::seq_cst);
+		Value *args[] = {ptr, order, position};
+		
+		Instruction* funcInst=CallInst::Create(CDSAtomicLoad[Idx], args);
+		ReplaceInstWithInst(CI, funcInst);
+
+		return true;
+	}
+
+	// atomic_store; args = {obj, val, order}
+	if (funName.contains("atomic_store")) {
+		bool isExplicit = funName.contains("atomic_store_explicit");
+		Value *OrigVal = parameters[1];
+
+		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
+		Value *val = IRB.CreatePointerCast(OrigVal, Ty);
+		Value *order;
+		if (isExplicit)
+			order = IRB.CreateBitOrPointerCast(parameters[2], OrdTy);
+		else 
+			order = ConstantInt::get(OrdTy, 
+							(int) AtomicOrderingCABI::seq_cst);
+		Value *args[] = {ptr, val, order, position};
+		
+		Instruction* funcInst=CallInst::Create(CDSAtomicStore[Idx], args);
+		ReplaceInstWithInst(CI, funcInst);
+
+		return true;
+	}
+
+	// atomic_fetch_*; args = {obj, val, order}
+	if (funName.contains("atomic_fetch_") || 
+			funName.contains("atomic_exchange") ) {
+		bool isExplicit = funName.contains("_explicit");
+		Value *OrigVal = parameters[1];
+
+		int op;
+		if ( funName.contains("_fetch_add") )
+			op = AtomicRMWInst::Add;
+		else if ( funName.contains("_fetch_sub") )
+			op = AtomicRMWInst::Sub;
+		else if ( funName.contains("_fetch_and") )
+			op = AtomicRMWInst::And;
+		else if ( funName.contains("_fetch_or") )
+			op = AtomicRMWInst::Or;
+		else if ( funName.contains("_fetch_xor") )
+			op = AtomicRMWInst::Xor;
+		else if ( funName.contains("atomic_exchange") )
+			op = AtomicRMWInst::Xchg;
+		else {
+			errs() << "Unknown atomic read modify write operation\n";
+			return false;
+		}
+
+		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
+		Value *val = IRB.CreatePointerCast(OrigVal, Ty);
+		Value *order;
+		if (isExplicit)
+			order = IRB.CreateBitOrPointerCast(parameters[2], OrdTy);
+		else 
+			order = ConstantInt::get(OrdTy, 
+							(int) AtomicOrderingCABI::seq_cst);
+		Value *args[] = {ptr, val, order, position};
+		
+		Instruction* funcInst=CallInst::Create(CDSAtomicRMW[op][Idx], args);
+		ReplaceInstWithInst(CI, funcInst);
+
+		return true;
+	}
+
+	/* atomic_compare_exchange_*; 
+	   args = {obj, expected, new value, order1, order2}
+	*/
+	if ( funName.contains("atomic_compare_exchange_") ) {
+		bool isExplicit = funName.contains("_explicit");
+
+		Value *Addr = IRB.CreatePointerCast(OrigPtr, PtrTy);
+		Value *CmpOperand = IRB.CreatePointerCast(parameters[1], PtrTy);
+		Value *NewOperand = IRB.CreateBitOrPointerCast(parameters[2], Ty);
+
+		Value *order_succ, *order_fail;
+		if (isExplicit) {
+			order_succ = IRB.CreateBitOrPointerCast(parameters[3], OrdTy);
+			order_fail = IRB.CreateBitOrPointerCast(parameters[4], OrdTy);
+		} else  {
+			order_succ = ConstantInt::get(OrdTy, 
+							(int) AtomicOrderingCABI::seq_cst);
+			order_fail = ConstantInt::get(OrdTy, 
+							(int) AtomicOrderingCABI::seq_cst);
+		}
+
+		Value *args[] = {Addr, CmpOperand, NewOperand, 
+							order_succ, order_fail, position};
+		
+		Instruction* funcInst=CallInst::Create(CDSAtomicCAS_V2[Idx], args);
+		ReplaceInstWithInst(CI, funcInst);
+
+		return true;
+	}
+
+	return false;
+}
 
 static bool shouldInstrumentReadWriteFromAddress(const Module *M, Value *Addr) {
   // Peel off GEPs and BitCasts.

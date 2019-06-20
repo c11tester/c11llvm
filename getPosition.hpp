@@ -17,3 +17,15 @@ Value *getPosition( Instruction * I, IRBuilder <> IRB)
 
 	return IRB . CreateGlobalStringPtr (position_string);
 }
+
+Value *getPositionPrint( Instruction * I, IRBuilder <> IRB)
+{
+	const DebugLoc & debug_location = I->getDebugLoc ();
+	std::string position_string;
+	{
+		llvm::raw_string_ostream position_stream (position_string);
+		debug_location . print (position_stream);
+	}
+	errs() << position_string << "\n";
+	return IRB . CreateGlobalStringPtr (position_string);
+}

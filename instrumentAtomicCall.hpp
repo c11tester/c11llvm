@@ -1,3 +1,5 @@
+// todo: come up with better rules for function name checking
+
 bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 	IRBuilder<> IRB(CI);
 	Function *fun = CI->getCalledFunction();
@@ -54,6 +56,21 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		ReplaceInstWithInst(CI, funcInst);
 
 		return true;
+	} else if (funName.contains("atomic") && 
+				funName.contains("load")) {
+		// does this version of call always have an atomic order as an argument?
+		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
+		Value *order = IRB.CreateBitOrPointerCast(parameters[1], OrdTy);
+		Value *args[] = {ptr, order, position};
+
+		//Instruction* funcInst=CallInst::Create(CDSAtomicLoad[Idx], args);
+		CallInst *funcInst = IRB.CreateCall(CDSAtomicLoad[Idx], args);
+		Value *RetVal = IRB.CreateIntToPtr(funcInst, CI->getType());
+
+		CI->replaceAllUsesWith(RetVal);
+		CI->eraseFromParent();
+		
+		return true;
 	}
 
 	// atomic_store; args = {obj, val, order}
@@ -71,9 +88,23 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 							(int) AtomicOrderingCABI::seq_cst);
 		Value *args[] = {ptr, val, order, position};
 		
-		Instruction* funcInst=CallInst::Create(CDSAtomicStore[Idx], args);
+		Instruction* funcInst = CallInst::Create(CDSAtomicStore[Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
 
+		return true;
+	} else if (funName.contains("atomic") && 
+					funName.contains("store")) {
+		// does this version of call always have an atomic order as an argument?
+		Value *OrigVal = parameters[1];
+
+		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
+		Value *val = IRB.CreatePointerCast(OrigVal, Ty);
+		Value *order = IRB.CreateBitOrPointerCast(parameters[1], OrdTy);
+		Value *args[] = {ptr, val, order, position};
+
+		Instruction* funcInst = CallInst::Create(CDSAtomicStore[Idx], args);
+		ReplaceInstWithInst(CI, funcInst);
+		
 		return true;
 	}
 
@@ -115,7 +146,16 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		ReplaceInstWithInst(CI, funcInst);
 
 		return true;
-	}
+	} else if (funName.contains("fetch")) {
+		errs() << "atomic exchange captured. Not implemented yet. "
+		errs() << "See source file :";
+		getPositionPrint(CI, IRB);
+	} else if (funName.contains("exchange") &&
+				!funName.contains("compare_exchange") ) {
+		errs() << "atomic exchange captured. Not implemented yet. "
+		errs() << "See source file :";
+		getPositionPrint(CI, IRB);
+	} 
 
 	/* atomic_compare_exchange_*; 
 	   args = {obj, expected, new value, order1, order2}
@@ -141,6 +181,23 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		Value *args[] = {Addr, CmpOperand, NewOperand, 
 							order_succ, order_fail, position};
 		
+		Instruction* funcInst=CallInst::Create(CDSAtomicCAS_V2[Idx], args);
+		ReplaceInstWithInst(CI, funcInst);
+
+		return true;
+	} else if ( funName.contains("compare_exchange_strong") || 
+				funName.contains("compare_exchange_wesk") ) {
+
+		Value *Addr = IRB.CreatePointerCast(OrigPtr, PtrTy);
+		Value *CmpOperand = IRB.CreatePointerCast(parameters[1], PtrTy);
+		Value *NewOperand = IRB.CreateBitOrPointerCast(parameters[2], Ty);
+
+		Value *order_succ, *order_fail;
+		order_succ = IRB.CreateBitOrPointerCast(parameters[3], OrdTy);
+		order_fail = IRB.CreateBitOrPointerCast(parameters[4], OrdTy);
+
+		Value *args[] = {Addr, CmpOperand, NewOperand, 
+							order_succ, order_fail, position};
 		Instruction* funcInst=CallInst::Create(CDSAtomicCAS_V2[Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
 

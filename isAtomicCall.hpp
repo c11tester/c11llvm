@@ -11,9 +11,12 @@ bool isAtomicCall(Instruction *I)
 
 		StringRef funName = fun->getName();
 
-		if ( (CI->isTailCall() && funName.contains("atomic_")) ||
-			funName.contains("atomic_compare_exchange_") ) {
+		// todo: come up with better rules for function name checking
+		if ( funName.contains("atomic_") ) {
 			// printArgs(CI);
+			return true;
+		} else if (funName.contains("atomic") ) {
+			// errs() << "intercepted atomic calls: " << *I << "\n";
 			return true;
 		}
 	}

@@ -1,7 +1,8 @@
 //===-- CDSPass.cpp - xxx -------------------------------===//
 //
-//                     The LLVM Compiler Infrastructure
-//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // This file is distributed under the University of Illinois Open Source
 // License. See LICENSE.TXT for details.
 //
@@ -43,9 +44,9 @@
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include <vector>
 
-#define DEBUG_TYPE "CDS"
 using namespace llvm;
 
+#define DEBUG_TYPE "CDS"
 #include <llvm/IR/DebugLoc.h>
 
 Value *getPosition( Instruction * I, IRBuilder <> IRB)
@@ -60,10 +61,9 @@ Value *getPosition( Instruction * I, IRBuilder <> IRB)
 	return IRB . CreateGlobalStringPtr (position_string);
 }
 
-#define FUNCARRAYSIZE 4
-
 STATISTIC(NumInstrumentedReads, "Number of instrumented reads");
 STATISTIC(NumInstrumentedWrites, "Number of instrumented writes");
+STATISTIC(NumAccessesWithBadSize, "Number of accesses with bad size");
 // STATISTIC(NumInstrumentedVtableWrites, "Number of vtable ptr writes");
 // STATISTIC(NumInstrumentedVtableReads, "Number of vtable ptr reads");
 
@@ -74,10 +74,6 @@ STATISTIC(NumOmittedReadsFromConstantGlobals,
 STATISTIC(NumOmittedReadsFromVtable, "Number of vtable reads");
 STATISTIC(NumOmittedNonCaptured, "Number of accesses ignored due to capturing");
 
-Type * Int8Ty;
-Type * Int16Ty;
-Type * Int32Ty;
-Type * Int64Ty;
 Type * OrdTy;
 
 Type * Int8PtrTy;
@@ -87,17 +83,16 @@ Type * Int64PtrTy;
 
 Type * VoidTy;
 
-Constant * CDSLoad[FUNCARRAYSIZE];
-Constant * CDSStore[FUNCARRAYSIZE];
-Constant * CDSAtomicInit[FUNCARRAYSIZE];
-Constant * CDSAtomicLoad[FUNCARRAYSIZE];
-Constant * CDSAtomicStore[FUNCARRAYSIZE];
-Constant * CDSAtomicRMW[AtomicRMWInst::LAST_BINOP + 1][FUNCARRAYSIZE];
-Constant * CDSAtomicCAS_V1[FUNCARRAYSIZE];
-Constant * CDSAtomicCAS_V2[FUNCARRAYSIZE];
+static const size_t kNumberOfAccessSizes = 4;
+Constant * CDSLoad[kNumberOfAccessSizes];
+Constant * CDSStore[kNumberOfAccessSizes];
+Constant * CDSAtomicInit[kNumberOfAccessSizes];
+Constant * CDSAtomicLoad[kNumberOfAccessSizes];
+Constant * CDSAtomicStore[kNumberOfAccessSizes];
+Constant * CDSAtomicRMW[AtomicRMWInst::LAST_BINOP + 1][kNumberOfAccessSizes];
+Constant * CDSAtomicCAS_V1[kNumberOfAccessSizes];
+Constant * CDSAtomicCAS_V2[kNumberOfAccessSizes];
 Constant * CDSAtomicThreadFence;
-
-bool start = false;
 
 int getAtomicOrderIndex(AtomicOrdering order){
   switch (order) {
@@ -117,32 +112,6 @@ int getAtomicOrderIndex(AtomicOrdering order){
       // unordered or Not Atomic
       return -1;
   }
-}
-
-int getTypeSize(Type* type) {
-  if (type == Int8PtrTy) {
-    return sizeof(char)*8;
-  } else if (type == Int16PtrTy) {
-    return sizeof(short)*8;
-  } else if (type == Int32PtrTy) {
-    return sizeof(int)*8;
-  } else if (type == Int64PtrTy) {
-    return sizeof(long long int)*8;
-  } else {
-    return sizeof(void*)*8;
-  }
-
-  return -1;
-}
-
-static int sizetoindex(int size) {
-  switch(size) {
-    case 8:     return 0;
-    case 16:    return 1;
-    case 32:    return 2;
-    case 64:    return 3;
-  }
-  return -1;
 }
 
 namespace {
@@ -174,10 +143,6 @@ void CDSPass::initializeCallbacks(Module &M) {
 	LLVMContext &Ctx = M.getContext();
 
 	Type * Int1Ty = Type::getInt1Ty(Ctx);
-	Int8Ty  = Type::getInt8Ty(Ctx);
-	Int16Ty = Type::getInt16Ty(Ctx);
-	Int32Ty = Type::getInt32Ty(Ctx);
-	Int64Ty = Type::getInt64Ty(Ctx);
 	OrdTy = Type::getInt32Ty(Ctx);
 
 	Int8PtrTy  = Type::getInt8PtrTy(Ctx);
@@ -188,7 +153,7 @@ void CDSPass::initializeCallbacks(Module &M) {
 	VoidTy = Type::getVoidTy(Ctx);
   
 	// Get the function to call from our untime library.
-	for (unsigned i = 0; i < FUNCARRAYSIZE; i++) {
+	for (unsigned i = 0; i < kNumberOfAccessSizes; i++) {
 		const unsigned ByteSize = 1U << i;
 		const unsigned BitSize = ByteSize * 8;
 
@@ -255,27 +220,25 @@ void CDSPass::initializeCallbacks(Module &M) {
 
 void printArgs(CallInst *);
 
-bool isAtomicCall(Instruction *I)
-{
+bool isAtomicCall(Instruction *I) {
 	if ( auto *CI = dyn_cast<CallInst>(I) ) {
 		Function *fun = CI->getCalledFunction();
 		if (fun == NULL)
 			return false;
 
 		StringRef funName = fun->getName();
-
-		if ( (CI->isTailCall() && funName.contains("atomic_")) ||
-			funName.contains("atomic_compare_exchange_") ) {
-			// printArgs(CI);
-			return true;
+                // todo: come up with better rules for function name checking
+                if ( funName.contains("atomic_") ) {
+                        return true;
+                } else if (funName.contains("atomic") ) {
+                       return true;
 		}
 	}
 
 	return false;
 }
 
-void printArgs (CallInst *CI)
-{
+void printArgs (CallInst *CI) {
 	Function *fun = CI->getCalledFunction();
 	StringRef funName = fun->getName();
 
@@ -350,7 +313,22 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		ReplaceInstWithInst(CI, funcInst);
 
 		return true;
-	}
+	} else if (funName.contains("atomic") && 
+                                funName.contains("load")) {
+                // does this version of call always have an atomic order as an argument?
+                Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
+                Value *order = IRB.CreateBitOrPointerCast(parameters[1], OrdTy);
+                Value *args[] = {ptr, order, position};
+
+                //Instruction* funcInst=CallInst::Create(CDSAtomicLoad[Idx], args);
+                CallInst *funcInst = IRB.CreateCall(CDSAtomicLoad[Idx], args);
+                Value *RetVal = IRB.CreateIntToPtr(funcInst, CI->getType());
+
+                CI->replaceAllUsesWith(RetVal);
+                CI->eraseFromParent();
+                
+                return true;
+        }
 
 	// atomic_store; args = {obj, val, order}
 	if (funName.contains("atomic_store")) {
@@ -371,7 +349,22 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		ReplaceInstWithInst(CI, funcInst);
 
 		return true;
-	}
+	} else if (funName.contains("atomic") && 
+                                funName.contains("EEEE5store")) {
+                // does this version of call always have an atomic order as an argument?
+                Value *OrigVal = parameters[1];
+
+                Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
+                Value *val = IRB.CreatePointerCast(OrigVal, Ty);
+                Value *order = IRB.CreateBitOrPointerCast(parameters[1], OrdTy);
+                Value *args[] = {ptr, val, order, position};
+
+                Instruction* funcInst = CallInst::Create(CDSAtomicStore[Idx], args);
+                ReplaceInstWithInst(CI, funcInst);
+
+                return true;
+        }
+
 
 	// atomic_fetch_*; args = {obj, val, order}
 	if (funName.contains("atomic_fetch_") || 
@@ -411,7 +404,16 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		ReplaceInstWithInst(CI, funcInst);
 
 		return true;
-	}
+	} else if (funName.contains("fetch")) {
+                errs() << "atomic exchange captured. Not implemented yet. ";
+                errs() << "See source file :";
+                getPositionPrint(CI, IRB);
+        } else if (funName.contains("exchange") &&
+                                !funName.contains("compare_exchange") ) {
+                errs() << "atomic exchange captured. Not implemented yet. ";
+                errs() << "See source file :";
+                getPositionPrint(CI, IRB);
+        }
 
 	/* atomic_compare_exchange_*; 
 	   args = {obj, expected, new value, order1, order2}
@@ -441,7 +443,24 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		ReplaceInstWithInst(CI, funcInst);
 
 		return true;
-	}
+	} else if ( funName.contains("compare_exchange_strong") || 
+                                funName.contains("compare_exchange_weak") ) {
+                Value *Addr = IRB.CreatePointerCast(OrigPtr, PtrTy);
+                Value *CmpOperand = IRB.CreatePointerCast(parameters[1], PtrTy);
+                Value *NewOperand = IRB.CreateBitOrPointerCast(parameters[2], Ty);
+
+                Value *order_succ, *order_fail;
+                order_succ = IRB.CreateBitOrPointerCast(parameters[3], OrdTy);
+                order_fail = IRB.CreateBitOrPointerCast(parameters[4], OrdTy);
+
+                Value *args[] = {Addr, CmpOperand, NewOperand, 
+                                                        order_succ, order_fail, position};
+                Instruction* funcInst=CallInst::Create(CDSAtomicCAS_V2[Idx], args);
+                ReplaceInstWithInst(CI, funcInst);
+
+                return true;
+        }
+
 
 	return false;
 }
@@ -607,8 +626,8 @@ bool CDSPass::instrumentLoadOrStore(Instruction *I,
   if (Addr->isSwiftError())
     return false;
 
-  int size = getTypeSize(Addr->getType());
-  int index = sizetoindex(size);
+  int Idx = getMemoryAccessFuncIndex(Addr, DL);
+
 
 //  not supported by CDS yet
 /*  if (IsWrite && isVtableAccess(I)) {
@@ -639,7 +658,7 @@ bool CDSPass::instrumentLoadOrStore(Instruction *I,
 */
 
   Value *OnAccessFunc = nullptr;
-  OnAccessFunc = IsWrite ? CDSStore[index] : CDSLoad[index];
+  OnAccessFunc = IsWrite ? CDSStore[Idx] : CDSLoad[Idx];
   
   Type *ArgType = IRB.CreatePointerCast(Addr, Addr->getType())->getType();
 
@@ -656,7 +675,6 @@ bool CDSPass::instrumentLoadOrStore(Instruction *I,
   return true;
 }
 
-// todo: replace getTypeSize with the getMemoryAccessFuncIndex
 bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
   IRBuilder<> IRB(I);
   // LLVMContext &Ctx = IRB.getContext();
@@ -667,56 +685,39 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 
   Value *position = getPosition(I, IRB);
 
-  if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
-    int atomic_order_index = getAtomicOrderIndex(SI->getOrdering());
-
-    Value *val = SI->getValueOperand();
-    Value *ptr = SI->getPointerOperand();
-    Value *order = ConstantInt::get(OrdTy, atomic_order_index);
-    Value *args[] = {ptr, val, order, position};
-
-    int size=getTypeSize(ptr->getType());
-    int index=sizetoindex(size);
-
-    Instruction* funcInst=CallInst::Create(CDSAtomicStore[index], args);
-    ReplaceInstWithInst(SI, funcInst);
-//    errs() << "Store replaced\n";
-  } else if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
+  if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
+    Value *Addr = LI->getPointerOperand();
+    int Idx=getMemoryAccessFuncIndex(Addr, DL);
     int atomic_order_index = getAtomicOrderIndex(LI->getOrdering());
-
-    Value *ptr = LI->getPointerOperand();
     Value *order = ConstantInt::get(OrdTy, atomic_order_index);
-    Value *args[] = {ptr, order, position};
-
-    int size=getTypeSize(ptr->getType());
-    int index=sizetoindex(size);
-
-    Instruction* funcInst=CallInst::Create(CDSAtomicLoad[index], args);
+    Value *args[] = {Addr, order, position};
+    Instruction* funcInst=CallInst::Create(CDSAtomicLoad[Idx], args);
     ReplaceInstWithInst(LI, funcInst);
-//    errs() << "Load Replaced\n";
-  } else if (AtomicRMWInst *RMWI = dyn_cast<AtomicRMWInst>(I)) {
-    int atomic_order_index = getAtomicOrderIndex(RMWI->getOrdering());
-
-    Value *val = RMWI->getValOperand();
-    Value *ptr = RMWI->getPointerOperand();
+  } else if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
+    Value *Addr = SI->getPointerOperand();
+    int Idx=getMemoryAccessFuncIndex(Addr, DL);
+    int atomic_order_index = getAtomicOrderIndex(SI->getOrdering());
+    Value *val = SI->getValueOperand();
     Value *order = ConstantInt::get(OrdTy, atomic_order_index);
-    Value *args[] = {ptr, val, order, position};
-
-    int size = getTypeSize(ptr->getType());
-    int index = sizetoindex(size);
-
-    Instruction* funcInst = CallInst::Create(CDSAtomicRMW[RMWI->getOperation()][index], args);
+    Value *args[] = {Addr, val, order, position};
+    Instruction* funcInst=CallInst::Create(CDSAtomicStore[Idx], args);
+    ReplaceInstWithInst(SI, funcInst);
+  } else if (AtomicRMWInst *RMWI = dyn_cast<AtomicRMWInst>(I)) {
+    Value *Addr = RMWI->getPointerOperand();
+    int Idx=getMemoryAccessFuncIndex(Addr, DL);
+    int atomic_order_index = getAtomicOrderIndex(RMWI->getOrdering());
+    Value *val = RMWI->getValOperand();
+    Value *order = ConstantInt::get(OrdTy, atomic_order_index);
+    Value *args[] = {Addr, val, order, position};
+    Instruction* funcInst = CallInst::Create(CDSAtomicRMW[RMWI->getOperation()][Idx], args);
     ReplaceInstWithInst(RMWI, funcInst);
-//    errs() << RMWI->getOperationName(RMWI->getOperation());
-//    errs() << " replaced\n";
   } else if (AtomicCmpXchgInst *CASI = dyn_cast<AtomicCmpXchgInst>(I)) {
     IRBuilder<> IRB(CASI);
 
     Value *Addr = CASI->getPointerOperand();
+    int Idx=getMemoryAccessFuncIndex(Addr, DL);
 
-    int size = getTypeSize(Addr->getType());
-    int index = sizetoindex(size);
-    const unsigned ByteSize = 1U << index;
+    const unsigned ByteSize = 1U << Idx;
     const unsigned BitSize = ByteSize * 8;
     Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
     Type *PtrTy = Ty->getPointerTo();
@@ -733,7 +734,7 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
                      CmpOperand, NewOperand,
                      order_succ, order_fail, position};
 
-    CallInst *funcInst = IRB.CreateCall(CDSAtomicCAS_V1[index], Args);
+    CallInst *funcInst = IRB.CreateCall(CDSAtomicCAS_V1[Idx], Args);
     Value *Success = IRB.CreateICmpEQ(funcInst, CmpOperand);
 
     Value *OldVal = funcInst;
@@ -769,12 +770,12 @@ int CDSPass::getMemoryAccessFuncIndex(Value *Addr,
   uint32_t TypeSize = DL.getTypeStoreSizeInBits(OrigTy);
   if (TypeSize != 8  && TypeSize != 16 &&
       TypeSize != 32 && TypeSize != 64 && TypeSize != 128) {
-    // NumAccessesWithBadSize++;
+    NumAccessesWithBadSize++;
     // Ignore all unusual sizes.
     return -1;
   }
   size_t Idx = countTrailingZeros(TypeSize / 8);
-  // assert(Idx < FUNCARRAYSIZE);
+  assert(Idx < kNumberOfAccessSizes);
   return Idx;
 }
 

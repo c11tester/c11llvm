@@ -93,7 +93,7 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 		return true;
 	} else if (funName.contains("atomic") && 
-					funName.contains("store")) {
+				funName.contains("EEEE5store")) {
 		// does this version of call always have an atomic order as an argument?
 		Value *OrigVal = parameters[1];
 
@@ -104,7 +104,7 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 		Instruction* funcInst = CallInst::Create(CDSAtomicStore[Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
-		
+
 		return true;
 	}
 
@@ -147,12 +147,12 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 		return true;
 	} else if (funName.contains("fetch")) {
-		errs() << "atomic exchange captured. Not implemented yet. "
+		errs() << "atomic exchange captured. Not implemented yet. ";
 		errs() << "See source file :";
 		getPositionPrint(CI, IRB);
 	} else if (funName.contains("exchange") &&
 				!funName.contains("compare_exchange") ) {
-		errs() << "atomic exchange captured. Not implemented yet. "
+		errs() << "atomic exchange captured. Not implemented yet. ";
 		errs() << "See source file :";
 		getPositionPrint(CI, IRB);
 	} 
@@ -187,7 +187,6 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		return true;
 	} else if ( funName.contains("compare_exchange_strong") || 
 				funName.contains("compare_exchange_wesk") ) {
-
 		Value *Addr = IRB.CreatePointerCast(OrigPtr, PtrTy);
 		Value *CmpOperand = IRB.CreatePointerCast(parameters[1], PtrTy);
 		Value *NewOperand = IRB.CreateBitOrPointerCast(parameters[2], Ty);

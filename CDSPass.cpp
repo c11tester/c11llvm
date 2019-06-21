@@ -62,7 +62,7 @@ Value *getPosition( Instruction * I, IRBuilder <> IRB, bool print = false)
 		errs() << position_string;
 	}
 
-	return IRB . CreateGlobalStringPtr (position_string);
+	return IRB.CreateGlobalStringPtr (position_string);
 }
 
 STATISTIC(NumInstrumentedReads, "Number of instrumented reads");
@@ -140,6 +140,9 @@ namespace {
 		Constant * CDSAtomicCAS_V1[kNumberOfAccessSizes];
 		Constant * CDSAtomicCAS_V2[kNumberOfAccessSizes];
 		Constant * CDSAtomicThreadFence;
+
+		std::vector<StringRef> AtomicFuncNames;
+		std::vector<StringRef> PartialAtomicFuncNames;
 	};
 }
 
@@ -161,6 +164,9 @@ void CDSPass::initializeCallbacks(Module &M) {
 	Int64PtrTy = Type::getInt64PtrTy(Ctx);
 
 	VoidTy = Type::getVoidTy(Ctx);
+
+	CDSFuncEntry = M.getOrInsertFunction("cds_func_entry", 
+								VoidTy, Int8PtrTy);
 
 	// Get the function to call from our untime library.
 	for (unsigned i = 0; i < kNumberOfAccessSizes; i++) {
@@ -289,6 +295,17 @@ bool CDSPass::runOnFunction(Function &F) {
 	if (true) {
 		initializeCallbacks( *F.getParent() );
 
+		AtomicFuncNames = 
+		{
+			"atomic_init", "atomic_load", "atomic_store", 
+			"atomic_fetch_", "atomic_exchange", "atomic_compare_exchange_"
+		};
+
+		PartialAtomicFuncNames = 
+		{ 
+			"load", "store", "fetch", "exchange", "compare_exchange_" 
+		};
+
 		SmallVector<Instruction*, 8> AllLoadsAndStores;
 		SmallVector<Instruction*, 8> LocalLoadsAndStores;
 		SmallVector<Instruction*, 8> AtomicAccesses;
@@ -296,6 +313,7 @@ bool CDSPass::runOnFunction(Function &F) {
 		std::vector<Instruction *> worklist;
 
 		bool Res = false;
+		bool HasAtomic = false;
 		const DataLayout &DL = F.getParent()->getDataLayout();
 
 		// errs() << "--- " << F.getName() << "---\n";
@@ -304,6 +322,7 @@ bool CDSPass::runOnFunction(Function &F) {
 			for (auto &I : B) {
 				if ( (&I)->isAtomic() || isAtomicCall(&I) ) {
 					AtomicAccesses.push_back(&I);
+					HasAtomic = true;
 				} else if (isa<LoadInst>(I) || isa<StoreInst>(I)) {
 					LocalLoadsAndStores.push_back(&I);
 				} else if (isa<CallInst>(I) || isa<InvokeInst>(I)) {
@@ -323,8 +342,26 @@ bool CDSPass::runOnFunction(Function &F) {
 			Res |= instrumentAtomic(Inst, DL);
 		}
 
-		if (F.getName() == "user_main") {
-			// F.dump();
+		// only instrument functions that contain atomics
+		if (Res && HasAtomic) {
+			/*
+			IRBuilder<> IRB(F.getEntryBlock().getFirstNonPHI());
+			Value *ReturnAddress = IRB.CreateCall(
+				Intrinsic::getDeclaration(F.getParent(), Intrinsic::returnaddress),
+				IRB.getInt32(0));
+
+			Value * FuncName = IRB.CreateGlobalStringPtr(F.getName());
+			*/
+			//errs() << "function name: " << F.getName() << "\n";
+			//IRB.CreateCall(CDSFuncEntry, FuncName);
+
+/*
+			EscapeEnumerator EE(F, "tsan_cleanup", ClHandleCxxExceptions);
+			while (IRBuilder<> *AtExit = EE.Next()) {
+			  AtExit->CreateCall(TsanFuncExit, {});
+			}
+*/
+			Res = true;
 		}
 	}
 
@@ -438,7 +475,6 @@ bool CDSPass::instrumentLoadOrStore(Instruction *I,
 
 bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 	IRBuilder<> IRB(I);
-	// LLVMContext &Ctx = IRB.getContext();
 
 	if (auto *CI = dyn_cast<CallInst>(I)) {
 		return instrumentAtomicCall(CI, DL);
@@ -530,11 +566,17 @@ bool CDSPass::isAtomicCall(Instruction *I) {
 			return false;
 
 		StringRef funName = fun->getName();
+
 		// todo: come up with better rules for function name checking
-		if ( funName.contains("atomic_") ) {
-			return true;
-		} else if (funName.contains("atomic") ) {
-			return true;
+		for (StringRef name : AtomicFuncNames) {
+			if ( funName.contains(name) ) 
+				return true;
+		}
+		
+		for (StringRef PartialName : PartialAtomicFuncNames) {
+			if (funName.contains(PartialName) && 
+					funName.contains("atomic") )
+				return true;
 		}
 	}
 
@@ -559,6 +601,7 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 	// the pointer to the address is always the first argument
 	Value *OrigPtr = parameters[0];
+
 	int Idx = getMemoryAccessFuncIndex(OrigPtr, DL);
 	if (Idx < 0)
 		return false;
@@ -598,13 +641,16 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 		return true;
 	} else if (funName.contains("atomic") && 
-					funName.contains("load")) {
+					funName.contains("load") ) {
 		// does this version of call always have an atomic order as an argument?
 		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
 		Value *order = IRB.CreateBitOrPointerCast(parameters[1], OrdTy);
 		Value *args[] = {ptr, order, position};
 
-		//Instruction* funcInst=CallInst::Create(CDSAtomicLoad[Idx], args);
+		if (!CI->getType()->isPointerTy()) {
+			return false;	
+		} 
+
 		CallInst *funcInst = IRB.CreateCall(CDSAtomicLoad[Idx], args);
 		Value *RetVal = IRB.CreateIntToPtr(funcInst, CI->getType());
 
@@ -634,7 +680,7 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 		return true;
 	} else if (funName.contains("atomic") && 
-					funName.contains("EEEE5store")) {
+					funName.contains("EEEE5store") ) {
 		// does this version of call always have an atomic order as an argument?
 		Value *OrigVal = parameters[1];
 
@@ -669,7 +715,7 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		else if ( funName.contains("atomic_exchange") )
 			op = AtomicRMWInst::Xchg;
 		else {
-			errs() << "Unknown atomic read modify write operation\n";
+			errs() << "Unknown atomic read-modify-write operation\n";
 			return false;
 		}
 
@@ -726,7 +772,7 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		ReplaceInstWithInst(CI, funcInst);
 
 		return true;
-	} else if ( funName.contains("compare_exchange_strong") || 
+	} else if ( funName.contains("compare_exchange_strong") ||
 				funName.contains("compare_exchange_weak") ) {
 		Value *Addr = IRB.CreatePointerCast(OrigPtr, PtrTy);
 		Value *CmpOperand = IRB.CreatePointerCast(parameters[1], PtrTy);

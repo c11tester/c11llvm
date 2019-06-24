@@ -42,6 +42,7 @@
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
+#include "llvm/Transforms/Utils/EscapeEnumerator.h"
 #include <vector>
 
 using namespace llvm;
@@ -166,6 +167,8 @@ void CDSPass::initializeCallbacks(Module &M) {
 	VoidTy = Type::getVoidTy(Ctx);
 
 	CDSFuncEntry = M.getOrInsertFunction("cds_func_entry", 
+								VoidTy, Int8PtrTy);
+	CDSFuncExit = M.getOrInsertFunction("cds_func_exit", 
 								VoidTy, Int8PtrTy);
 
 	// Get the function to call from our untime library.
@@ -344,23 +347,21 @@ bool CDSPass::runOnFunction(Function &F) {
 
 		// only instrument functions that contain atomics
 		if (Res && HasAtomic) {
-			/*
 			IRBuilder<> IRB(F.getEntryBlock().getFirstNonPHI());
 			Value *ReturnAddress = IRB.CreateCall(
 				Intrinsic::getDeclaration(F.getParent(), Intrinsic::returnaddress),
 				IRB.getInt32(0));
 
 			Value * FuncName = IRB.CreateGlobalStringPtr(F.getName());
-			*/
-			//errs() << "function name: " << F.getName() << "\n";
-			//IRB.CreateCall(CDSFuncEntry, FuncName);
+			
+			errs() << "function name: " << F.getName() << "\n";
+			IRB.CreateCall(CDSFuncEntry, FuncName);
 
-/*
-			EscapeEnumerator EE(F, "tsan_cleanup", ClHandleCxxExceptions);
+			EscapeEnumerator EE(F, "cds_cleanup", true);
 			while (IRBuilder<> *AtExit = EE.Next()) {
-			  AtExit->CreateCall(TsanFuncExit, {});
+			  AtExit->CreateCall(CDSFuncExit, FuncName);
 			}
-*/
+
 			Res = true;
 		}
 	}
@@ -462,10 +463,8 @@ bool CDSPass::instrumentLoadOrStore(Instruction *I,
 
 	if ( ArgType != Int8PtrTy && ArgType != Int16PtrTy && 
 			ArgType != Int32PtrTy && ArgType != Int64PtrTy ) {
-		//errs() << "A load or store of type ";
-		//errs() << *ArgType;
-		//errs() << " is passed in\n";
-		return false;	// if other types of load or stores are passed in
+		// if other types of load or stores are passed in
+		return false;	
 	}
 	IRB.CreateCall(OnAccessFunc, IRB.CreatePointerCast(Addr, Addr->getType()));
 	if (IsWrite) NumInstrumentedWrites++;
@@ -475,6 +474,8 @@ bool CDSPass::instrumentLoadOrStore(Instruction *I,
 
 bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 	IRBuilder<> IRB(I);
+
+	// errs() << "instrumenting: " << *I << "\n";
 
 	if (auto *CI = dyn_cast<CallInst>(I)) {
 		return instrumentAtomicCall(CI, DL);

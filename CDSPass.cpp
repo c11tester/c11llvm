@@ -337,8 +337,7 @@ bool CDSPass::runOnFunction(Function &F) {
 		}
 
 		for (auto Inst : AllLoadsAndStores) {
-			// Res |= instrumentLoadOrStore(Inst, DL);
-			// errs() << "load and store are replaced\n";
+			Res |= instrumentLoadOrStore(Inst, DL);
 		}
 
 		for (auto Inst : AtomicAccesses) {
@@ -348,13 +347,13 @@ bool CDSPass::runOnFunction(Function &F) {
 		// only instrument functions that contain atomics
 		if (Res && HasAtomic) {
 			IRBuilder<> IRB(F.getEntryBlock().getFirstNonPHI());
+			/* Unused for now
 			Value *ReturnAddress = IRB.CreateCall(
 				Intrinsic::getDeclaration(F.getParent(), Intrinsic::returnaddress),
 				IRB.getInt32(0));
+			*/
 
 			Value * FuncName = IRB.CreateGlobalStringPtr(F.getName());
-			
-			errs() << "function name: " << F.getName() << "\n";
 			IRB.CreateCall(CDSFuncEntry, FuncName);
 
 			EscapeEnumerator EE(F, "cds_cleanup", true);

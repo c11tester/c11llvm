@@ -60,7 +60,7 @@ Value *getPosition( Instruction * I, IRBuilder <> IRB, bool print = false)
 	}
 
 	if (print) {
-		errs() << position_string;
+		errs() << position_string << "\n";
 	}
 
 	return IRB.CreateGlobalStringPtr (position_string);
@@ -426,6 +426,8 @@ bool CDSPass::instrumentLoadOrStore(Instruction *I,
 	return false;
 
 	int Idx = getMemoryAccessFuncIndex(Addr, DL);
+	if (Idx < 0)
+		return false;
 
 //  not supported by CDS yet
 /*  if (IsWrite && isVtableAccess(I)) {
@@ -485,6 +487,9 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 	if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
 		Value *Addr = LI->getPointerOperand();
 		int Idx=getMemoryAccessFuncIndex(Addr, DL);
+		if (Idx < 0)
+			return false;
+
 		int atomic_order_index = getAtomicOrderIndex(LI->getOrdering());
 		Value *order = ConstantInt::get(OrdTy, atomic_order_index);
 		Value *args[] = {Addr, order, position};
@@ -493,6 +498,9 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 	} else if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
 		Value *Addr = SI->getPointerOperand();
 		int Idx=getMemoryAccessFuncIndex(Addr, DL);
+		if (Idx < 0)
+			return false;
+
 		int atomic_order_index = getAtomicOrderIndex(SI->getOrdering());
 		Value *val = SI->getValueOperand();
 		Value *order = ConstantInt::get(OrdTy, atomic_order_index);
@@ -502,6 +510,9 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 	} else if (AtomicRMWInst *RMWI = dyn_cast<AtomicRMWInst>(I)) {
 		Value *Addr = RMWI->getPointerOperand();
 		int Idx=getMemoryAccessFuncIndex(Addr, DL);
+		if (Idx < 0)
+			return false;
+
 		int atomic_order_index = getAtomicOrderIndex(RMWI->getOrdering());
 		Value *val = RMWI->getValOperand();
 		Value *order = ConstantInt::get(OrdTy, atomic_order_index);
@@ -513,6 +524,8 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 
 		Value *Addr = CASI->getPointerOperand();
 		int Idx=getMemoryAccessFuncIndex(Addr, DL);
+		if (Idx < 0)
+			return false;
 
 		const unsigned ByteSize = 1U << Idx;
 		const unsigned BitSize = ByteSize * 8;
@@ -806,7 +819,10 @@ int CDSPass::getMemoryAccessFuncIndex(Value *Addr,
 		return -1;
 	}
 	size_t Idx = countTrailingZeros(TypeSize / 8);
-	assert(Idx < kNumberOfAccessSizes);
+	//assert(Idx < kNumberOfAccessSizes);
+	if (Idx >= kNumberOfAccessSizes) {
+		return -1;
+	}
 	return Idx;
 }
 
@@ -818,6 +834,13 @@ static void registerCDSPass(const PassManagerBuilder &,
 							legacy::PassManagerBase &PM) {
 	PM.add(new CDSPass());
 }
+
+/* Enable the pass when opt level is greater than 0 */
 static RegisterStandardPasses 
-	RegisterMyPass(PassManagerBuilder::EP_OptimizerLast,
+	RegisterMyPass1(PassManagerBuilder::EP_OptimizerLast,
+registerCDSPass);
+
+/* Enable the pass when opt level is 0 */
+static RegisterStandardPasses 
+	RegisterMyPass2(PassManagerBuilder::EP_EnabledOnOptLevel0,
 registerCDSPass);

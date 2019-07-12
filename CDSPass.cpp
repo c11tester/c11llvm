@@ -699,7 +699,7 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
 		Value *val = IRB.CreatePointerCast(OrigVal, Ty);
-		Value *order = IRB.CreateBitOrPointerCast(parameters[1], OrdTy);
+		Value *order = IRB.CreateBitOrPointerCast(parameters[2], OrdTy);
 		Value *args[] = {ptr, val, order, position};
 
 		Instruction* funcInst = CallInst::Create(CDSAtomicStore[Idx], args);

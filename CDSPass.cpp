@@ -89,7 +89,6 @@ Type * Int64PtrTy;
 Type * VoidTy;
 
 static const size_t kNumberOfAccessSizes = 4;
-static const int volatile_order = 6;
 
 int getAtomicOrderIndex(AtomicOrdering order){
 	switch (order) {
@@ -199,9 +198,9 @@ void CDSPass::initializeCallbacks(Module &M) {
 		CDSLoad[i]  = M.getOrInsertFunction(LoadName, VoidTy, PtrTy);
 		CDSStore[i] = M.getOrInsertFunction(StoreName, VoidTy, PtrTy);
 		CDSVolatileLoad[i]  = M.getOrInsertFunction(VolatileLoadName,
-									Ty, PtrTy, OrdTy, Int8PtrTy);
+									Ty, PtrTy, Int8PtrTy);
 		CDSVolatileStore[i] = M.getOrInsertFunction(VolatileStoreName, 
-									VoidTy, PtrTy, Ty, OrdTy, Int8PtrTy);
+									VoidTy, PtrTy, Ty, Int8PtrTy);
 		CDSAtomicInit[i] = M.getOrInsertFunction(AtomicInitName, 
 								VoidTy, PtrTy, Ty, Int8PtrTy);
 		CDSAtomicLoad[i]  = M.getOrInsertFunction(AtomicLoadName, 
@@ -508,8 +507,7 @@ bool CDSPass::instrumentVolatile(Instruction * I, const DataLayout &DL) {
 		if (Idx < 0)
 			return false;
 
-		Value *order = ConstantInt::get(OrdTy, volatile_order);
-		Value *args[] = {Addr, order, position};
+		Value *args[] = {Addr, position};
 		Instruction* funcInst=CallInst::Create(CDSVolatileLoad[Idx], args);
 		ReplaceInstWithInst(LI, funcInst);
 	} else if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
@@ -520,8 +518,7 @@ bool CDSPass::instrumentVolatile(Instruction * I, const DataLayout &DL) {
 			return false;
 
 		Value *val = SI->getValueOperand();
-		Value *order = ConstantInt::get(OrdTy, volatile_order);
-		Value *args[] = {Addr, val, order, position};
+		Value *args[] = {Addr, val, position};
 		Instruction* funcInst=CallInst::Create(CDSVolatileStore[Idx], args);
 		ReplaceInstWithInst(SI, funcInst);
 	} else {

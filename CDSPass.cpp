@@ -89,6 +89,7 @@ Type * Int64PtrTy;
 Type * VoidTy;
 
 static const size_t kNumberOfAccessSizes = 4;
+static const int volatile_order = 6;
 
 int getAtomicOrderIndex(AtomicOrdering order){
 	switch (order) {
@@ -119,6 +120,7 @@ namespace {
 	private:
 		void initializeCallbacks(Module &M);
 		bool instrumentLoadOrStore(Instruction *I, const DataLayout &DL);
+		bool instrumentVolatile(Instruction *I, const DataLayout &DL);
 		bool isAtomicCall(Instruction *I);
 		bool instrumentAtomic(Instruction *I, const DataLayout &DL);
 		bool instrumentAtomicCall(CallInst *CI, const DataLayout &DL);
@@ -134,6 +136,8 @@ namespace {
 
 		Constant * CDSLoad[kNumberOfAccessSizes];
 		Constant * CDSStore[kNumberOfAccessSizes];
+		Constant * CDSVolatileLoad[kNumberOfAccessSizes];
+		Constant * CDSVolatileStore[kNumberOfAccessSizes];
 		Constant * CDSAtomicInit[kNumberOfAccessSizes];
 		Constant * CDSAtomicLoad[kNumberOfAccessSizes];
 		Constant * CDSAtomicStore[kNumberOfAccessSizes];
@@ -186,12 +190,18 @@ void CDSPass::initializeCallbacks(Module &M) {
 		// void cds_atomic_store8 (void * obj, int atomic_index, uint8_t val)
 		SmallString<32> LoadName("cds_load" + BitSizeStr);
 		SmallString<32> StoreName("cds_store" + BitSizeStr);
+		SmallString<32> VolatileLoadName("cds_volatile_load" + BitSizeStr);
+		SmallString<32> VolatileStoreName("cds_volatile_store" + BitSizeStr);
 		SmallString<32> AtomicInitName("cds_atomic_init" + BitSizeStr);
 		SmallString<32> AtomicLoadName("cds_atomic_load" + BitSizeStr);
 		SmallString<32> AtomicStoreName("cds_atomic_store" + BitSizeStr);
 
 		CDSLoad[i]  = M.getOrInsertFunction(LoadName, VoidTy, PtrTy);
 		CDSStore[i] = M.getOrInsertFunction(StoreName, VoidTy, PtrTy);
+		CDSVolatileLoad[i]  = M.getOrInsertFunction(VolatileLoadName,
+									Ty, PtrTy, OrdTy, Int8PtrTy);
+		CDSVolatileStore[i] = M.getOrInsertFunction(VolatileStoreName, 
+									VoidTy, PtrTy, Ty, OrdTy, Int8PtrTy);
 		CDSAtomicInit[i] = M.getOrInsertFunction(AtomicInitName, 
 								VoidTy, PtrTy, Ty, Int8PtrTy);
 		CDSAtomicLoad[i]  = M.getOrInsertFunction(AtomicLoadName, 
@@ -311,6 +321,7 @@ bool CDSPass::runOnFunction(Function &F) {
 
 		SmallVector<Instruction*, 8> AllLoadsAndStores;
 		SmallVector<Instruction*, 8> LocalLoadsAndStores;
+		SmallVector<Instruction*, 8> VolatileLoadsAndStores;
 		SmallVector<Instruction*, 8> AtomicAccesses;
 
 		std::vector<Instruction *> worklist;
@@ -327,7 +338,14 @@ bool CDSPass::runOnFunction(Function &F) {
 					AtomicAccesses.push_back(&I);
 					HasAtomic = true;
 				} else if (isa<LoadInst>(I) || isa<StoreInst>(I)) {
-					LocalLoadsAndStores.push_back(&I);
+					LoadInst *LI = dyn_cast<LoadInst>(&I);
+					StoreInst *SI = dyn_cast<StoreInst>(&I);
+					bool isVolatile = ( LI ? LI->isVolatile() : SI->isVolatile() );
+
+					if (isVolatile)
+						VolatileLoadsAndStores.push_back(&I);
+					else
+						LocalLoadsAndStores.push_back(&I);
 				} else if (isa<CallInst>(I) || isa<InvokeInst>(I)) {
 					// not implemented yet
 				}
@@ -338,6 +356,10 @@ bool CDSPass::runOnFunction(Function &F) {
 
 		for (auto Inst : AllLoadsAndStores) {
 			Res |= instrumentLoadOrStore(Inst, DL);
+		}
+
+		for (auto Inst : VolatileLoadsAndStores) {
+			Res |= instrumentVolatile(Inst, DL);
 		}
 
 		for (auto Inst : AtomicAccesses) {
@@ -363,6 +385,8 @@ bool CDSPass::runOnFunction(Function &F) {
 
 			Res = true;
 		}
+
+		F.dump();
 	}
 
 	return false;
@@ -473,10 +497,42 @@ bool CDSPass::instrumentLoadOrStore(Instruction *I,
 	return true;
 }
 
+bool CDSPass::instrumentVolatile(Instruction * I, const DataLayout &DL) {
+	IRBuilder<> IRB(I);
+	Value *position = getPosition(I, IRB);
+
+	if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
+		assert( LI->isVolatile() );
+		Value *Addr = LI->getPointerOperand();
+		int Idx=getMemoryAccessFuncIndex(Addr, DL);
+		if (Idx < 0)
+			return false;
+
+		Value *order = ConstantInt::get(OrdTy, volatile_order);
+		Value *args[] = {Addr, order, position};
+		Instruction* funcInst=CallInst::Create(CDSVolatileLoad[Idx], args);
+		ReplaceInstWithInst(LI, funcInst);
+	} else if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
+		assert( SI->isVolatile() );
+		Value *Addr = SI->getPointerOperand();
+		int Idx=getMemoryAccessFuncIndex(Addr, DL);
+		if (Idx < 0)
+			return false;
+
+		Value *val = SI->getValueOperand();
+		Value *order = ConstantInt::get(OrdTy, volatile_order);
+		Value *args[] = {Addr, val, order, position};
+		Instruction* funcInst=CallInst::Create(CDSVolatileStore[Idx], args);
+		ReplaceInstWithInst(SI, funcInst);
+	} else {
+		return false;
+	}
+
+	return true;
+}
+
 bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 	IRBuilder<> IRB(I);
-
-	// errs() << "instrumenting: " << *I << "\n";
 
 	if (auto *CI = dyn_cast<CallInst>(I)) {
 		return instrumentAtomicCall(CI, DL);

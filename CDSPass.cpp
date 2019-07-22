@@ -385,8 +385,6 @@ bool CDSPass::runOnFunction(Function &F) {
 
 			Res = true;
 		}
-
-		F.dump();
 	}
 
 	return false;

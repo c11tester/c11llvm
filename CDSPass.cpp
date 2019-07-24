@@ -327,6 +327,7 @@ bool CDSPass::runOnFunction(Function &F) {
 
 		bool Res = false;
 		bool HasAtomic = false;
+		bool HasVolatile = false;
 		const DataLayout &DL = F.getParent()->getDataLayout();
 
 		// errs() << "--- " << F.getName() << "---\n";
@@ -341,9 +342,10 @@ bool CDSPass::runOnFunction(Function &F) {
 					StoreInst *SI = dyn_cast<StoreInst>(&I);
 					bool isVolatile = ( LI ? LI->isVolatile() : SI->isVolatile() );
 
-					if (isVolatile)
+					if (isVolatile) {
 						VolatileLoadsAndStores.push_back(&I);
-					else
+						HasVolatile = true;
+					} else
 						LocalLoadsAndStores.push_back(&I);
 				} else if (isa<CallInst>(I) || isa<InvokeInst>(I)) {
 					// not implemented yet
@@ -366,7 +368,7 @@ bool CDSPass::runOnFunction(Function &F) {
 		}
 
 		// only instrument functions that contain atomics
-		if (Res && HasAtomic) {
+		if (Res && ( HasAtomic || HasVolatile) ) {
 			IRBuilder<> IRB(F.getEntryBlock().getFirstNonPHI());
 			/* Unused for now
 			Value *ReturnAddress = IRB.CreateCall(

@@ -746,7 +746,7 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 		return true;
 	} else if (funName.contains("atomic") && 
-					funName.contains("EEEE5store") ) {
+					funName.contains("store") ) {
 		// does this version of call always have an atomic order as an argument?
 		Value *OrigVal = parameters[1];
 

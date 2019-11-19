@@ -90,7 +90,7 @@ Type * VoidTy;
 
 static const size_t kNumberOfAccessSizes = 4;
 
-int getAtomicOrderIndex(AtomicOrdering order){
+int getAtomicOrderIndex(AtomicOrdering order) {
 	switch (order) {
 		case AtomicOrdering::Monotonic: 
 			return (int)AtomicOrderingCABI::relaxed;
@@ -108,6 +108,40 @@ int getAtomicOrderIndex(AtomicOrdering order){
 			// unordered or Not Atomic
 			return -1;
 	}
+}
+
+AtomicOrderingCABI indexToAtomicOrder(int index) {
+	switch (index) {
+		case 0:
+			return AtomicOrderingCABI::relaxed;
+		case 1:
+			return AtomicOrderingCABI::consume;
+		case 2:
+			return AtomicOrderingCABI::acquire;
+		case 3:
+			return AtomicOrderingCABI::release;
+		case 4:
+			return AtomicOrderingCABI::acq_rel;
+		case 5:
+			return AtomicOrderingCABI::seq_cst;
+		default:
+			errs() << "Bad Atomic index\n";
+			return AtomicOrderingCABI::seq_cst;
+	}
+}
+
+/* According to atomic_base.h: __cmpexch_failure_order */
+int AtomicCasFailureOrderIndex(int index) {
+	AtomicOrderingCABI succ_order = indexToAtomicOrder(index);
+	AtomicOrderingCABI fail_order;
+	if (succ_order == AtomicOrderingCABI::acq_rel)
+		fail_order = AtomicOrderingCABI::acquire;
+	else if (succ_order == AtomicOrderingCABI::release) 
+		fail_order = AtomicOrderingCABI::relaxed;
+	else
+		fail_order = succ_order;
+
+	return (int) fail_order;
 }
 
 namespace {
@@ -827,14 +861,36 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 		return true;
 	} else if (funName.contains("fetch")) {
-		errs() << "atomic exchange captured. Not implemented yet. ";
+		errs() << "atomic fetch captured. Not implemented yet. ";
 		errs() << "See source file :";
 		getPosition(CI, IRB, true);
+		return false;
 	} else if (funName.contains("exchange") &&
 			!funName.contains("compare_exchange") ) {
-		errs() << "atomic exchange captured. Not implemented yet. ";
-		errs() << "See source file :";
-		getPosition(CI, IRB, true);
+		if (CI->getType()->isPointerTy()) {
+			// Can not deal with this now
+			errs() << "atomic exchange captured. Not implemented yet. ";
+			errs() << "See source file :";
+			getPosition(CI, IRB, true);
+
+			return false;
+		}
+
+		Value *OrigVal = parameters[1];
+
+		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
+		Value *val;
+		if (OrigVal->getType()->isPtrOrPtrVectorTy())
+			val = IRB.CreatePointerCast(OrigVal, Ty);
+		else
+			val = IRB.CreateIntCast(OrigVal, Ty, true);
+
+		Value *order = IRB.CreateBitOrPointerCast(parameters[2], OrdTy);
+		Value *args[] = {ptr, val, order, position};
+		int op = AtomicRMWInst::Xchg;
+		
+		Instruction* funcInst = CallInst::Create(CDSAtomicRMW[op][Idx], args);
+		ReplaceInstWithInst(CI, funcInst);
 	}
 
 	/* atomic_compare_exchange_*; 
@@ -850,7 +906,18 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		Value *order_succ, *order_fail;
 		if (isExplicit) {
 			order_succ = IRB.CreateBitOrPointerCast(parameters[3], OrdTy);
-			order_fail = IRB.CreateBitOrPointerCast(parameters[4], OrdTy);
+
+			if (parameters.size() > 4) {
+				order_fail = IRB.CreateBitOrPointerCast(parameters[4], OrdTy);
+			} else {
+				/* The failure order is not provided */
+				order_fail = order_succ;
+				ConstantInt * order_succ_cast = dyn_cast<ConstantInt>(order_succ);
+				int index = order_succ_cast->getSExtValue();
+
+				order_fail = ConstantInt::get(OrdTy,
+								AtomicCasFailureOrderIndex(index));
+			}
 		} else  {
 			order_succ = ConstantInt::get(OrdTy, 
 							(int) AtomicOrderingCABI::seq_cst);
@@ -873,7 +940,18 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 		Value *order_succ, *order_fail;
 		order_succ = IRB.CreateBitOrPointerCast(parameters[3], OrdTy);
-		order_fail = IRB.CreateBitOrPointerCast(parameters[4], OrdTy);
+
+		if (parameters.size() > 4) {
+			order_fail = IRB.CreateBitOrPointerCast(parameters[4], OrdTy);
+		} else {
+			/* The failure order is not provided */
+			order_fail = order_succ;
+			ConstantInt * order_succ_cast = dyn_cast<ConstantInt>(order_succ);
+			int index = order_succ_cast->getSExtValue();
+
+			order_fail = ConstantInt::get(OrdTy,
+							AtomicCasFailureOrderIndex(index));
+		}
 
 		Value *args[] = {Addr, CmpOperand, NewOperand, 
 							order_succ, order_fail, position};

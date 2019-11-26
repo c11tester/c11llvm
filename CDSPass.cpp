@@ -177,6 +177,7 @@ namespace {
 		bool isAtomicCall(Instruction *I);
 		bool instrumentAtomic(Instruction *I, const DataLayout &DL);
 		bool instrumentAtomicCall(CallInst *CI, const DataLayout &DL);
+		bool shouldInstrumentBeforeAtomics(Instruction *I);
 		void chooseInstructionsToInstrument(SmallVectorImpl<Instruction *> &Local,
 											SmallVectorImpl<Instruction *> &All,
 											const DataLayout &DL);
@@ -412,6 +413,32 @@ bool CDSPass::addrPointsToConstantData(Value *Addr) {
 	return false;
 }
 
+bool CDSPass::shouldInstrumentBeforeAtomics(Instruction * Inst) {
+	if (LoadInst *LI = dyn_cast<LoadInst>(Inst)) {
+		AtomicOrdering ordering = LI->getOrdering();
+		if ( isAtLeastOrStrongerThan(ordering, AtomicOrdering::Acquire) )
+			return true;
+	} else if (StoreInst *SI = dyn_cast<StoreInst>(Inst)) {
+		AtomicOrdering ordering = SI->getOrdering();
+		if ( isAtLeastOrStrongerThan(ordering, AtomicOrdering::Acquire) )
+			return true;
+	} else if (AtomicRMWInst *RMWI = dyn_cast<AtomicRMWInst>(Inst)) {
+		AtomicOrdering ordering = RMWI->getOrdering();
+		if ( isAtLeastOrStrongerThan(ordering, AtomicOrdering::Acquire) )
+			return true;
+	} else if (AtomicCmpXchgInst *CASI = dyn_cast<AtomicCmpXchgInst>(Inst)) {
+		AtomicOrdering ordering = CASI->getSuccessOrdering();
+		if ( isAtLeastOrStrongerThan(ordering, AtomicOrdering::Acquire) )
+			return true;
+	} else if (FenceInst *FI = dyn_cast<FenceInst>(Inst)) {
+		AtomicOrdering ordering = FI->getOrdering();
+		if ( isAtLeastOrStrongerThan(ordering, AtomicOrdering::Acquire) )
+			return true;
+	}
+
+	return false;
+}
+
 void CDSPass::chooseInstructionsToInstrument(
 	SmallVectorImpl<Instruction *> &Local, SmallVectorImpl<Instruction *> &All,
 	const DataLayout &DL) {
@@ -484,9 +511,19 @@ bool CDSPass::runOnFunction(Function &F) {
 
 	for (auto &BB : F) {
 		for (auto &Inst : BB) {
-			if ( (&Inst)->isAtomic() || isAtomicCall(&Inst) ) {
+			if ( (&Inst)->isAtomic() ) {
 				AtomicAccesses.push_back(&Inst);
 				HasAtomic = true;
+
+				if (shouldInstrumentBeforeAtomics(&Inst)) {
+					chooseInstructionsToInstrument(LocalLoadsAndStores, AllLoadsAndStores,
+						DL);
+				}
+			} else if (isAtomicCall(&Inst) ) {
+				AtomicAccesses.push_back(&Inst);
+				HasAtomic = true;
+				chooseInstructionsToInstrument(LocalLoadsAndStores, AllLoadsAndStores,
+					DL);
 			} else if (isa<LoadInst>(Inst) || isa<StoreInst>(Inst)) {
 				LoadInst *LI = dyn_cast<LoadInst>(&Inst);
 				StoreInst *SI = dyn_cast<StoreInst>(&Inst);

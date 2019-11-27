@@ -42,7 +42,6 @@
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/EscapeEnumerator.h"
-// #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include <vector>
 
@@ -601,39 +600,43 @@ bool CDSPass::instrumentLoadOrStore(Instruction *I,
 	// As such they cannot have regular uses like an instrumentation function and
 	// it makes no sense to track them as memory.
 	if (Addr->isSwiftError())
-	return false;
+		return false;
 
 	int Idx = getMemoryAccessFuncIndex(Addr, DL);
 	if (Idx < 0)
 		return false;
 
-//  not supported by CDS yet
-/*  if (IsWrite && isVtableAccess(I)) {
-    LLVM_DEBUG(dbgs() << "  VPTR : " << *I << "\n");
-    Value *StoredValue = cast<StoreInst>(I)->getValueOperand();
-    // StoredValue may be a vector type if we are storing several vptrs at once.
-    // In this case, just take the first element of the vector since this is
-    // enough to find vptr races.
-    if (isa<VectorType>(StoredValue->getType()))
-      StoredValue = IRB.CreateExtractElement(
-          StoredValue, ConstantInt::get(IRB.getInt32Ty(), 0));
-    if (StoredValue->getType()->isIntegerTy())
-      StoredValue = IRB.CreateIntToPtr(StoredValue, IRB.getInt8PtrTy());
-    // Call TsanVptrUpdate.
-    IRB.CreateCall(TsanVptrUpdate,
-                   {IRB.CreatePointerCast(Addr, IRB.getInt8PtrTy()),
-                    IRB.CreatePointerCast(StoredValue, IRB.getInt8PtrTy())});
-    NumInstrumentedVtableWrites++;
-    return true;
-  }
+	if (IsWrite && isVtableAccess(I)) {
+		/* TODO
+		LLVM_DEBUG(dbgs() << "	VPTR : " << *I << "\n");
+		Value *StoredValue = cast<StoreInst>(I)->getValueOperand();
+		// StoredValue may be a vector type if we are storing several vptrs at once.
+		// In this case, just take the first element of the vector since this is
+		// enough to find vptr races.
+		if (isa<VectorType>(StoredValue->getType()))
+			StoredValue = IRB.CreateExtractElement(
+					StoredValue, ConstantInt::get(IRB.getInt32Ty(), 0));
+		if (StoredValue->getType()->isIntegerTy())
+			StoredValue = IRB.CreateIntToPtr(StoredValue, IRB.getInt8PtrTy());
+		// Call TsanVptrUpdate.
+		IRB.CreateCall(TsanVptrUpdate,
+						{IRB.CreatePointerCast(Addr, IRB.getInt8PtrTy()),
+							IRB.CreatePointerCast(StoredValue, IRB.getInt8PtrTy())});
+		NumInstrumentedVtableWrites++;
+		*/
+		return true;
+	}
 
-  if (!IsWrite && isVtableAccess(I)) {
-    IRB.CreateCall(TsanVptrLoad,
-                   IRB.CreatePointerCast(Addr, IRB.getInt8PtrTy()));
-    NumInstrumentedVtableReads++;
-    return true;
-  }
-*/
+	if (!IsWrite && isVtableAccess(I)) {
+		/* TODO
+		IRB.CreateCall(TsanVptrLoad,
+						 IRB.CreatePointerCast(Addr, IRB.getInt8PtrTy()));
+		NumInstrumentedVtableReads++;
+		*/
+		return true;
+	}
+
+	// TODO: unaligned reads and writes
 
 	Value *OnAccessFunc = nullptr;
 	OnAccessFunc = IsWrite ? CDSStore[Idx] : CDSLoad[Idx];
@@ -930,7 +933,7 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		return true;
 	} else if (funName.contains("atomic") && 
 					funName.contains("store") ) {
-		// does this version of call always have an atomic order as an argument?
+		// Does this version of call always have an atomic order as an argument?
 		Value *OrigVal = parameters[1];
 
 		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
@@ -1005,7 +1008,13 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 	} else if (funName.contains("exchange") &&
 			!funName.contains("compare_exchange") ) {
 		if (CI->getType()->isPointerTy()) {
-			// Can not deal with this now
+			/**
+			 * TODO: instrument the following case
+			 * mcs-lock.h
+			 * std::atomic<struct T *> m_tail;
+			 * struct T * me;
+			 * struct T * pred = m_tail.exchange(me, memory_order_*);
+			 */
 			errs() << "atomic exchange captured. Not implemented yet. ";
 			errs() << "See source file :";
 			getPosition(CI, IRB, true);
@@ -1025,9 +1034,11 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		Value *order = IRB.CreateBitOrPointerCast(parameters[2], OrdTy);
 		Value *args[] = {ptr, val, order, position};
 		int op = AtomicRMWInst::Xchg;
-		
+
 		Instruction* funcInst = CallInst::Create(CDSAtomicRMW[op][Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
+
+		return true;
 	}
 
 	/* atomic_compare_exchange_*; 

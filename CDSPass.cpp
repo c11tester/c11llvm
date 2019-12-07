@@ -491,11 +491,6 @@ void CDSPass::InsertRuntimeIgnores(Function &F) {
 }*/
 
 bool CDSPass::runOnFunction(Function &F) {
-	if (F.getName() == "main") {
-		F.setName("user_main");
-		errs() << "main replaced by user_main\n";
-	}
-
 	initializeCallbacks( *F.getParent() );
 	SmallVector<Instruction*, 8> AllLoadsAndStores;
 	SmallVector<Instruction*, 8> LocalLoadsAndStores;

@@ -25,6 +25,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Analysis/CaptureTracking.h"
+#include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -47,10 +48,11 @@
 
 using namespace llvm;
 
+#define CDS_DEBUG
 #define DEBUG_TYPE "CDS"
 #include <llvm/IR/DebugLoc.h>
 
-Value *getPosition( Instruction * I, IRBuilder <> IRB, bool print = false)
+static inline Value *getPosition( Instruction * I, IRBuilder <> IRB, bool print = false)
 {
 	const DebugLoc & debug_location = I->getDebugLoc ();
 	std::string position_string;
@@ -64,6 +66,21 @@ Value *getPosition( Instruction * I, IRBuilder <> IRB, bool print = false)
 	}
 
 	return IRB.CreateGlobalStringPtr (position_string);
+}
+
+static inline bool checkSignature(Function * func, Value * args[]) {
+	FunctionType * FType = func->getFunctionType();
+	for (unsigned i = 0 ; i < FType->getNumParams(); i++) {
+		if (FType->getParamType(i) != args[i]->getType()) {
+#ifdef CDS_DEBUG
+			errs() << "expects: " << *FType->getParamType(i)
+					<< "\tbut receives: " << *args[i]->getType() << "\n";
+#endif
+			return false;
+		}
+	}
+
+	return true;
 }
 
 STATISTIC(NumInstrumentedReads, "Number of instrumented reads");
@@ -96,8 +113,8 @@ int getAtomicOrderIndex(AtomicOrdering order) {
 	switch (order) {
 		case AtomicOrdering::Monotonic: 
 			return (int)AtomicOrderingCABI::relaxed;
-		//  case AtomicOrdering::Consume:         // not specified yet
-		//    return AtomicOrderingCABI::consume;
+		//case AtomicOrdering::Consume:		// not specified yet
+		//	return AtomicOrderingCABI::consume;
 		case AtomicOrdering::Acquire: 
 			return (int)AtomicOrderingCABI::acquire;
 		case AtomicOrdering::Release: 
@@ -153,7 +170,7 @@ static Function * checkCDSPassInterfaceFunction(Constant *FuncOrBitcast) {
 	if (isa<Function>(FuncOrBitcast))
 		return cast<Function>(FuncOrBitcast);
 	FuncOrBitcast->print(errs());
-	errs() << '\n';
+	errs() << "\n";
 	std::string Err;
 	raw_string_ostream Stream(Err);
 	Stream << "CDSPass interface function redefined: " << *FuncOrBitcast;
@@ -182,6 +199,7 @@ namespace {
 											const DataLayout &DL);
 		bool addrPointsToConstantData(Value *Addr);
 		int getMemoryAccessFuncIndex(Value *Addr, const DataLayout &DL);
+		bool instrumentLoops(Function &F);
 
 		Function * CDSFuncEntry;
 		Function * CDSFuncExit;
@@ -491,11 +509,6 @@ void CDSPass::InsertRuntimeIgnores(Function &F) {
 }*/
 
 bool CDSPass::runOnFunction(Function &F) {
-	if (F.getName() == "main") {
-		F.setName("user_main");
-		errs() << "main replaced by user_main\n";
-	}
-
 	initializeCallbacks( *F.getParent() );
 	SmallVector<Instruction*, 8> AllLoadsAndStores;
 	SmallVector<Instruction*, 8> LocalLoadsAndStores;
@@ -507,6 +520,8 @@ bool CDSPass::runOnFunction(Function &F) {
 	bool HasAtomic = false;
 	bool HasVolatile = false;
 	const DataLayout &DL = F.getParent()->getDataLayout();
+
+	// instrumentLoops(F);
 
 	for (auto &BB : F) {
 		for (auto &Inst : BB) {
@@ -565,7 +580,7 @@ bool CDSPass::runOnFunction(Function &F) {
 		Res |= instrumentMemIntrinsic(Inst);
 	}
 
-	// Only instrument functions that contain atomics or volatiles
+	// Instrument function entry and exit for functions containing atomics or volatiles
 	if (Res && ( HasAtomic || HasVolatile) ) {
 		IRBuilder<> IRB(F.getEntryBlock().getFirstNonPHI());
 		/* Unused for now
@@ -657,18 +672,23 @@ bool CDSPass::instrumentLoadOrStore(Instruction *I,
 
 bool CDSPass::instrumentVolatile(Instruction * I, const DataLayout &DL) {
 	IRBuilder<> IRB(I);
+	const unsigned ByteSize = 1U << Idx;
+	const unsigned BitSize = ByteSize * 8;
+	Type *Ty = Type::getIntNTy(IRB.getContext(), BitSize);
+	Type *PtrTy = Ty->getPointerTo();
 	Value *position = getPosition(I, IRB);
 
 	if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
-		assert( LI->isVolatile() );
 		Value *Addr = LI->getPointerOperand();
 		int Idx=getMemoryAccessFuncIndex(Addr, DL);
 		if (Idx < 0)
 			return false;
 
-		Value *args[] = {Addr, position};
-		Instruction* funcInst = CallInst::Create(CDSVolatileLoad[Idx], args);
-		ReplaceInstWithInst(LI, funcInst);
+		Value *Args[] = {IRB.CreatePointerCast(Addr, PtrTy), position};
+		Type *OrigTy = cast<PointerType>(Addr->getType())->getElementType();
+		Value *C = IRB.CreateCall(CDSVolatileLoad[Idx], Args);
+		Value *Cast = IRB.CreateBitOrPointerCast(C, OrigTy);
+		I->replaceAllUsesWith(Cast);
 	} else if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
 		assert( SI->isVolatile() );
 		Value *Addr = SI->getPointerOperand();
@@ -676,10 +696,11 @@ bool CDSPass::instrumentVolatile(Instruction * I, const DataLayout &DL) {
 		if (Idx < 0)
 			return false;
 
-		Value *val = SI->getValueOperand();
-		Value *args[] = {Addr, val, position};
-		Instruction* funcInst = CallInst::Create(CDSVolatileStore[Idx], args);
-		ReplaceInstWithInst(SI, funcInst);
+		Value *Args[] = {IRB.CreatePointerCast(Addr, PtrTy),
+					  IRB.CreateBitOrPointerCast(SI->getValueOperand(), Ty),
+					  position};
+		CallInst *C = CallInst::Create(CDSVolatileStore[Idx], Args);
+		ReplaceInstWithInst(I, C);
 	} else {
 		return false;
 	}
@@ -715,7 +736,6 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 	}
 
 	Value *position = getPosition(I, IRB);
-
 	if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
 		Value *Addr = LI->getPointerOperand();
 		int Idx=getMemoryAccessFuncIndex(Addr, DL);
@@ -724,8 +744,8 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 
 		int atomic_order_index = getAtomicOrderIndex(LI->getOrdering());
 		Value *order = ConstantInt::get(OrdTy, atomic_order_index);
-		Value *args[] = {Addr, order, position};
-		Instruction* funcInst = CallInst::Create(CDSAtomicLoad[Idx], args);
+		Value *Args[] = {Addr, order, position};
+		Instruction* funcInst = CallInst::Create(CDSAtomicLoad[Idx], Args);
 		ReplaceInstWithInst(LI, funcInst);
 	} else if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
 		Value *Addr = SI->getPointerOperand();
@@ -736,8 +756,8 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 		int atomic_order_index = getAtomicOrderIndex(SI->getOrdering());
 		Value *val = SI->getValueOperand();
 		Value *order = ConstantInt::get(OrdTy, atomic_order_index);
-		Value *args[] = {Addr, val, order, position};
-		Instruction* funcInst = CallInst::Create(CDSAtomicStore[Idx], args);
+		Value *Args[] = {Addr, val, order, position};
+		Instruction* funcInst = CallInst::Create(CDSAtomicStore[Idx], Args);
 		ReplaceInstWithInst(SI, funcInst);
 	} else if (AtomicRMWInst *RMWI = dyn_cast<AtomicRMWInst>(I)) {
 		Value *Addr = RMWI->getPointerOperand();
@@ -748,8 +768,8 @@ bool CDSPass::instrumentAtomic(Instruction * I, const DataLayout &DL) {
 		int atomic_order_index = getAtomicOrderIndex(RMWI->getOrdering());
 		Value *val = RMWI->getValOperand();
 		Value *order = ConstantInt::get(OrdTy, atomic_order_index);
-		Value *args[] = {Addr, val, order, position};
-		Instruction* funcInst = CallInst::Create(CDSAtomicRMW[RMWI->getOperation()][Idx], args);
+		Value *Args[] = {Addr, val, order, position};
+		Instruction* funcInst = CallInst::Create(CDSAtomicRMW[RMWI->getOperation()][Idx], Args);
 		ReplaceInstWithInst(RMWI, funcInst);
 	} else if (AtomicCmpXchgInst *CASI = dyn_cast<AtomicCmpXchgInst>(I)) {
 		IRBuilder<> IRB(CASI);
@@ -869,9 +889,11 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 		Value *args[] = {ptr, val, position};
 
+		if (!checkSignature(CDSAtomicInit[Idx], args))
+			return false;
+
 		Instruction* funcInst = CallInst::Create(CDSAtomicInit[Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
-
 		return true;
 	}
 
@@ -887,7 +909,10 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 			order = ConstantInt::get(OrdTy, 
 							(int) AtomicOrderingCABI::seq_cst);
 		Value *args[] = {ptr, order, position};
-		
+
+		if (!checkSignature(CDSAtomicLoad[Idx], args))
+			return false;
+
 		Instruction* funcInst = CallInst::Create(CDSAtomicLoad[Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
 
@@ -899,9 +924,13 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 		Value *order = IRB.CreateBitOrPointerCast(parameters[1], OrdTy);
 		Value *args[] = {ptr, order, position};
 
+		// Without this check, gdax does not compile :(
 		if (!CI->getType()->isPointerTy()) {
 			return false;	
 		} 
+
+		if (!checkSignature(CDSAtomicLoad[Idx], args))
+			return false;
 
 		CallInst *funcInst = IRB.CreateCall(CDSAtomicLoad[Idx], args);
 		Value *RetVal = IRB.CreateIntToPtr(funcInst, CI->getType());
@@ -926,7 +955,10 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 			order = ConstantInt::get(OrdTy, 
 							(int) AtomicOrderingCABI::seq_cst);
 		Value *args[] = {ptr, val, order, position};
-		
+
+		if (!checkSignature(CDSAtomicStore[Idx], args))
+			return false;
+
 		Instruction* funcInst = CallInst::Create(CDSAtomicStore[Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
 
@@ -934,9 +966,12 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 	} else if (funName.contains("atomic") && 
 					funName.contains("store") ) {
 		// Does this version of call always have an atomic order as an argument?
-		Value *OrigVal = parameters[1];
+		if (parameters.size() < 3)
+			return false;
 
+		Value *OrigVal = parameters[1];
 		Value *ptr = IRB.CreatePointerCast(OrigPtr, PtrTy);
+
 		Value *val;
 		if (OrigVal->getType()->isPtrOrPtrVectorTy())
 			val = IRB.CreatePointerCast(OrigVal, Ty);
@@ -945,6 +980,9 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 		Value *order = IRB.CreateBitOrPointerCast(parameters[2], OrdTy);
 		Value *args[] = {ptr, val, order, position};
+
+		if (!checkSignature(CDSAtomicStore[Idx], args))
+			return false;
 
 		Instruction* funcInst = CallInst::Create(CDSAtomicStore[Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
@@ -955,10 +993,6 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 	// atomic_fetch_*; args = {obj, val, order}
 	if (funName.contains("atomic_fetch_") || 
 		funName.contains("atomic_exchange")) {
-
-		/* TODO: implement stricter function name checking */
-		if (funName.contains("non"))
-			return false;
 
 		bool isExplicit = funName.contains("_explicit");
 		Value *OrigVal = parameters[1];
@@ -995,7 +1029,10 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 			order = ConstantInt::get(OrdTy, 
 							(int) AtomicOrderingCABI::seq_cst);
 		Value *args[] = {ptr, val, order, position};
-		
+
+		if (!checkSignature(CDSAtomicRMW[op][Idx], args))
+			return false;
+
 		Instruction* funcInst = CallInst::Create(CDSAtomicRMW[op][Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
 
@@ -1033,7 +1070,11 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 		Value *order = IRB.CreateBitOrPointerCast(parameters[2], OrdTy);
 		Value *args[] = {ptr, val, order, position};
+
 		int op = AtomicRMWInst::Xchg;
+
+		if (!checkSignature(CDSAtomicRMW[op][Idx], args))
+			return false;
 
 		Instruction* funcInst = CallInst::Create(CDSAtomicRMW[op][Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
@@ -1075,7 +1116,10 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 		Value *args[] = {Addr, CmpOperand, NewOperand, 
 							order_succ, order_fail, position};
-		
+
+		if (!checkSignature(CDSAtomicCAS_V2[Idx], args))
+			return false;
+
 		Instruction* funcInst = CallInst::Create(CDSAtomicCAS_V2[Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
 
@@ -1103,6 +1147,10 @@ bool CDSPass::instrumentAtomicCall(CallInst *CI, const DataLayout &DL) {
 
 		Value *args[] = {Addr, CmpOperand, NewOperand, 
 							order_succ, order_fail, position};
+
+		if (!checkSignature(CDSAtomicCAS_V2[Idx], args))
+			return false;
+
 		Instruction* funcInst = CallInst::Create(CDSAtomicCAS_V2[Idx], args);
 		ReplaceInstWithInst(CI, funcInst);
 
@@ -1132,6 +1180,58 @@ int CDSPass::getMemoryAccessFuncIndex(Value *Addr,
 	return Idx;
 }
 
+bool CDSPass::instrumentLoops(Function &F)
+{
+	DominatorTree DT(F);
+	LoopInfo LI(DT);
+
+	SmallVector<Loop *, 4> Loops = LI.getLoopsInPreorder();
+	bool instrumented = false;
+
+	// Do a post-order traversal of the loops so that counter updates can be
+	// iteratively hoisted outside the loop nest.
+	for (auto *Loop : llvm::reverse(Loops)) {
+		bool instrument_loop = false;
+
+		// Iterator over loop blocks and search for atomics and volatiles
+		Loop::block_iterator it;
+		for (it = Loop->block_begin(); it != Loop->block_end(); it++) {
+			BasicBlock * block = *it;
+			for (auto &Inst : *block) {
+				if ( (&Inst)->isAtomic() ) {
+					instrument_loop = true;
+					break;
+				} else if (isAtomicCall(&Inst)) {
+					instrument_loop = true;
+					break;
+				} else if (isa<LoadInst>(Inst) || isa<StoreInst>(Inst)) {
+					LoadInst *LI = dyn_cast<LoadInst>(&Inst);
+					StoreInst *SI = dyn_cast<StoreInst>(&Inst);
+					bool isVolatile = ( LI ? LI->isVolatile() : SI->isVolatile() );
+
+					if (isVolatile) {
+						instrument_loop = true;
+						break;
+					}
+				}
+			}
+
+			if (instrument_loop)
+				break;
+		}
+
+		if (instrument_loop) {
+			// TODO: what to instrument?
+			errs() << "Function: " << F.getName() << "\n";
+			BasicBlock * header = Loop->getHeader();
+			header->dump();
+
+			instrumented = true;
+		}
+	}
+
+	return instrumented;
+}
 
 char CDSPass::ID = 0;
 

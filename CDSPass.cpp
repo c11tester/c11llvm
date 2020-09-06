@@ -52,7 +52,7 @@ using namespace llvm;
 #define DEBUG_TYPE "CDS"
 #include <llvm/IR/DebugLoc.h>
 
-static inline Value *getPosition( Instruction * I, IRBuilder <> IRB, bool print = false)
+Value *getPosition( Instruction * I, IRBuilder <> &IRB, bool print = false)
 {
 	const DebugLoc & debug_location = I->getDebugLoc ();
 	std::string position_string;
@@ -166,7 +166,7 @@ int AtomicCasFailureOrderIndex(int index) {
 /* The original function checkSanitizerInterfaceFunction was defined
  * in llvm/Transforms/Utils/ModuleUtils.h
  */
-static Function * checkCDSPassInterfaceFunction(Constant *FuncOrBitcast) {
+static Function * checkCDSPassInterfaceFunction(Value *FuncOrBitcast) {
 	if (isa<Function>(FuncOrBitcast))
 		return cast<Function>(FuncOrBitcast);
 	FuncOrBitcast->print(errs());
@@ -246,10 +246,10 @@ void CDSPass::initializeCallbacks(Module &M) {
 
 	CDSFuncEntry = checkCDSPassInterfaceFunction(
 						M.getOrInsertFunction("cds_func_entry", 
-						Attr, VoidTy, Int8PtrTy));
+                                  Attr, VoidTy, Int8PtrTy).getCallee());
 	CDSFuncExit = checkCDSPassInterfaceFunction(
 						M.getOrInsertFunction("cds_func_exit", 
-						Attr, VoidTy, Int8PtrTy));
+                                  Attr, VoidTy, Int8PtrTy).getCallee());
 
 	// Get the function to call from our untime library.
 	for (unsigned i = 0; i < kNumberOfAccessSizes; i++) {
@@ -273,24 +273,24 @@ void CDSPass::initializeCallbacks(Module &M) {
 		SmallString<32> AtomicStoreName("cds_atomic_store" + BitSizeStr);
 
 		CDSLoad[i]  = checkCDSPassInterfaceFunction(
-							M.getOrInsertFunction(LoadName, Attr, VoidTy, Int8PtrTy));
+                                                M.getOrInsertFunction(LoadName, Attr, VoidTy, Int8PtrTy).getCallee());
 		CDSStore[i] = checkCDSPassInterfaceFunction(
-							M.getOrInsertFunction(StoreName, Attr, VoidTy, Int8PtrTy));
+                                                M.getOrInsertFunction(StoreName, Attr, VoidTy, Int8PtrTy).getCallee());
 		CDSVolatileLoad[i]  = checkCDSPassInterfaceFunction(
 								M.getOrInsertFunction(VolatileLoadName,
-								Attr, Ty, PtrTy, Int8PtrTy));
+                                      Attr, Ty, PtrTy, Int8PtrTy).getCallee());
 		CDSVolatileStore[i] = checkCDSPassInterfaceFunction(
 								M.getOrInsertFunction(VolatileStoreName, 
-								Attr, VoidTy, PtrTy, Ty, Int8PtrTy));
+                                      Attr, VoidTy, PtrTy, Ty, Int8PtrTy).getCallee());
 		CDSAtomicInit[i] = checkCDSPassInterfaceFunction(
 							M.getOrInsertFunction(AtomicInitName, 
-							Attr, VoidTy, PtrTy, Ty, Int8PtrTy));
+                                    Attr, VoidTy, PtrTy, Ty, Int8PtrTy).getCallee());
 		CDSAtomicLoad[i]  = checkCDSPassInterfaceFunction(
 								M.getOrInsertFunction(AtomicLoadName, 
-								Attr, Ty, PtrTy, OrdTy, Int8PtrTy));
+                                      Attr, Ty, PtrTy, OrdTy, Int8PtrTy).getCallee());
 		CDSAtomicStore[i] = checkCDSPassInterfaceFunction(
 								M.getOrInsertFunction(AtomicStoreName, 
-								Attr, VoidTy, PtrTy, Ty, OrdTy, Int8PtrTy));
+                                      Attr, VoidTy, PtrTy, Ty, OrdTy, Int8PtrTy).getCallee());
 
 		for (int op = AtomicRMWInst::FIRST_BINOP; 
 			op <= AtomicRMWInst::LAST_BINOP; ++op) {
@@ -315,7 +315,7 @@ void CDSPass::initializeCallbacks(Module &M) {
 			SmallString<32> AtomicRMWName("cds_atomic" + NamePart + BitSizeStr);
 			CDSAtomicRMW[op][i] = checkCDSPassInterfaceFunction(
 									M.getOrInsertFunction(AtomicRMWName, 
-									Attr, Ty, PtrTy, Ty, OrdTy, Int8PtrTy));
+                                        Attr, Ty, PtrTy, Ty, OrdTy, Int8PtrTy).getCallee());
 		}
 
 		// only supportes strong version
@@ -323,24 +323,24 @@ void CDSPass::initializeCallbacks(Module &M) {
 		SmallString<32> AtomicCASName_V2("cds_atomic_compare_exchange" + BitSizeStr + "_v2");
 		CDSAtomicCAS_V1[i] = checkCDSPassInterfaceFunction(
 								M.getOrInsertFunction(AtomicCASName_V1, 
-								Attr, Ty, PtrTy, Ty, Ty, OrdTy, OrdTy, Int8PtrTy));
+                                      Attr, Ty, PtrTy, Ty, Ty, OrdTy, OrdTy, Int8PtrTy).getCallee());
 		CDSAtomicCAS_V2[i] = checkCDSPassInterfaceFunction(
 								M.getOrInsertFunction(AtomicCASName_V2, 
-								Attr, Int1Ty, PtrTy, PtrTy, Ty, OrdTy, OrdTy, Int8PtrTy));
+                                      Attr, Int1Ty, PtrTy, PtrTy, Ty, OrdTy, OrdTy, Int8PtrTy).getCallee());
 	}
 
 	CDSAtomicThreadFence = checkCDSPassInterfaceFunction(
-			M.getOrInsertFunction("cds_atomic_thread_fence", Attr, VoidTy, OrdTy, Int8PtrTy));
+                                                       M.getOrInsertFunction("cds_atomic_thread_fence", Attr, VoidTy, OrdTy, Int8PtrTy).getCallee());
 
 	MemmoveFn = checkCDSPassInterfaceFunction(
 					M.getOrInsertFunction("memmove", Attr, Int8PtrTy, Int8PtrTy,
-					Int8PtrTy, IntPtrTy));
+                                Int8PtrTy, IntPtrTy).getCallee());
 	MemcpyFn = checkCDSPassInterfaceFunction(
 					M.getOrInsertFunction("memcpy", Attr, Int8PtrTy, Int8PtrTy,
-					Int8PtrTy, IntPtrTy));
+                                Int8PtrTy, IntPtrTy).getCallee());
 	MemsetFn = checkCDSPassInterfaceFunction(
 					M.getOrInsertFunction("memset", Attr, Int8PtrTy, Int8PtrTy,
-					Int32Ty, IntPtrTy));
+                                Int32Ty, IntPtrTy).getCallee());
 }
 
 bool CDSPass::doInitialization(Module &M) {
